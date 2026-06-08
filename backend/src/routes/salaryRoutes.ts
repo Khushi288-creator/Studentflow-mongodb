@@ -1,6 +1,9 @@
 import express from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/prisma'
+import { Salary } from '../models/Salary'
+import { User } from '../models/User'
+import { Notice } from '../models/Notice'
+import { leanDoc } from '../utils/mongoHelpers'
 import { authenticateJWT, requireRole } from '../middleware/auth'
 
 const router = express.Router()
@@ -28,25 +31,31 @@ router.post('/admin/salary', authenticateJWT, requireRole(['admin']), async (req
     const { teacherId, month, year, baseSalary, hra, bonus, leaveDeduction, latePenalty } = parsed.data
     const netSalary = baseSalary + hra + bonus - leaveDeduction - latePenalty
 
-    // Prevent duplicate for same teacher+month+year
-    const existing = await prisma.salary.findFirst({ where: { teacherId, month, year } })
+    const existing = await Salary.findOne({ teacherId, month, year }).lean()
     if (existing) return res.status(409).json({ message: `Salary for ${MONTHS[month-1]} ${year} already exists for this teacher.` })
 
-    const teacher = await prisma.user.findUnique({ where: { id: teacherId } })
+    const teacher = await User.findById(teacherId).lean()
     if (!teacher || teacher.role !== 'teacher') return res.status(404).json({ message: 'Teacher not found' })
 
-    const salary = await prisma.salary.create({
-      data: { teacherId, month, year, baseSalary, hra, bonus, leaveDeduction, latePenalty, netSalary, status: 'pending' },
+    const created = await Salary.create({
+      teacherId,
+      month,
+      year,
+      baseSalary,
+      hra,
+      bonus,
+      leaveDeduction,
+      latePenalty,
+      netSalary,
+      status: 'pending',
     })
+    const salary = leanDoc(created.toObject())
 
-    // Notify teacher
-    await prisma.notice.create({
-      data: {
-        title: `Salary Record: ${MONTHS[month-1]} ${year}`,
-        description: `Your salary of ₹${netSalary.toLocaleString('en-IN')} for ${MONTHS[month-1]} ${year} has been recorded. Status: Pending.`,
-        type: 'notice',
-        userId: teacherId,
-      },
+    await Notice.create({
+      title: `Salary Record: ${MONTHS[month-1]} ${year}`,
+      description: `Your salary of ₹${netSalary.toLocaleString('en-IN')} for ${MONTHS[month-1]} ${year} has been recorded. Status: Pending.`,
+      type: 'notice',
+      userId: teacherId,
     })
 
     res.status(201).json({ salary })
@@ -60,20 +69,21 @@ router.post('/admin/salary', authenticateJWT, requireRole(['admin']), async (req
 router.get('/admin/salary', authenticateJWT, requireRole(['admin']), async (req, res) => {
   try {
     const { month, year, status } = req.query as Record<string, string>
-    const salaries = await prisma.salary.findMany({
-      where: {
-        ...(month && month !== 'all' ? { month: Number(month) } : {}),
-        ...(year && year !== 'all' ? { year: Number(year) } : {}),
-        ...(status && status !== 'all' ? { status } : {}),
-      },
-      orderBy: [{ year: 'desc' }, { month: 'desc' }],
-      include: { teacher: { select: { name: true } } },
-    })
+    const filter: Record<string, unknown> = {}
+    if (month && month !== 'all') filter.month = Number(month)
+    if (year && year !== 'all') filter.year = Number(year)
+    if (status && status !== 'all') filter.status = status
+
+    const salaries = await Salary.find(filter).sort({ year: -1, month: -1 }).lean()
+
+    const teacherIds = [...new Set(salaries.map((s) => s.teacherId))]
+    const teachers = await User.find({ _id: { $in: teacherIds } }).select('_id name').lean()
+    const teacherNameById = new Map(teachers.map((t) => [t._id, t.name]))
 
     res.json({
-      salaries: salaries.map(s => ({
-        id: s.id,
-        teacherName: s.teacher.name,
+      salaries: salaries.map((s) => ({
+        id: s._id,
+        teacherName: teacherNameById.get(s.teacherId) ?? '',
         teacherId: s.teacherId,
         month: s.month,
         monthName: MONTHS[s.month - 1],
@@ -97,25 +107,25 @@ router.get('/admin/salary', authenticateJWT, requireRole(['admin']), async (req,
 router.post('/admin/salary/:id/pay', authenticateJWT, requireRole(['admin']), async (req, res) => {
   try {
     const id = req.params.id as string
-    const salary = await prisma.salary.findUnique({ where: { id } })
+    const salary = await Salary.findById(id).lean()
     if (!salary) return res.status(404).json({ message: 'Salary record not found' })
     if (salary.status === 'paid') return res.status(400).json({ message: 'Already paid' })
 
-    const updated = await prisma.salary.update({
-      where: { id },
-      data: { status: 'paid', paidAt: new Date() },
+    const updated = await Salary.findOneAndUpdate(
+      { _id: id },
+      { status: 'paid', paidAt: new Date() },
+      { new: true },
+    ).lean()
+    if (!updated) return res.status(404).json({ message: 'Salary record not found' })
+
+    await Notice.create({
+      title: `✅ Salary Paid: ${MONTHS[salary.month - 1]} ${salary.year}`,
+      description: `Your salary of ₹${salary.netSalary.toLocaleString('en-IN')} for ${MONTHS[salary.month - 1]} ${salary.year} has been paid.`,
+      type: 'notice',
+      userId: salary.teacherId,
     })
 
-    await prisma.notice.create({
-      data: {
-        title: `✅ Salary Paid: ${MONTHS[salary.month - 1]} ${salary.year}`,
-        description: `Your salary of ₹${salary.netSalary.toLocaleString('en-IN')} for ${MONTHS[salary.month - 1]} ${salary.year} has been paid.`,
-        type: 'notice',
-        userId: salary.teacherId,
-      },
-    })
-
-    res.json({ salary: { id: updated.id, status: updated.status, paidAt: updated.paidAt?.toISOString().slice(0, 10) } })
+    res.json({ salary: { id: updated._id, status: updated.status, paidAt: updated.paidAt?.toISOString().slice(0, 10) } })
   } catch (err: any) {
     console.error('[POST /admin/salary/:id/pay]', err?.message)
     res.status(500).json({ message: err?.message ?? 'Failed to process payment' })
@@ -126,7 +136,7 @@ router.post('/admin/salary/:id/pay', authenticateJWT, requireRole(['admin']), as
 router.delete('/admin/salary/:id', authenticateJWT, requireRole(['admin']), async (req, res) => {
   try {
     const id = req.params.id as string
-    await prisma.salary.delete({ where: { id } })
+    await Salary.findOneAndDelete({ _id: id })
     res.json({ ok: true })
   } catch (err: any) {
     res.status(500).json({ message: err?.message ?? 'Failed' })
@@ -136,13 +146,12 @@ router.delete('/admin/salary/:id', authenticateJWT, requireRole(['admin']), asyn
 // ── Teacher: view own salary records ─────────────────────────────────────
 router.get('/salary/me', authenticateJWT, requireRole(['teacher']), async (req, res) => {
   try {
-    const salaries = await prisma.salary.findMany({
-      where: { teacherId: req.auth!.userId },
-      orderBy: [{ year: 'desc' }, { month: 'desc' }],
-    })
+    const salaries = await Salary.find({ teacherId: req.auth!.userId })
+      .sort({ year: -1, month: -1 })
+      .lean()
     res.json({
-      salaries: salaries.map(s => ({
-        id: s.id,
+      salaries: salaries.map((s) => ({
+        id: s._id,
         month: s.month,
         monthName: MONTHS[s.month - 1],
         year: s.year,

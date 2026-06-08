@@ -1,6 +1,6 @@
 import { type NextFunction, type Request, type Response } from 'express'
 import jwt from 'jsonwebtoken'
-import { Role } from '../../generated/prisma/enums'
+import { type Role } from '../types/enums'
 
 export type AuthUser = {
   userId: string

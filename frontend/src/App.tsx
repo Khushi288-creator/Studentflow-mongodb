@@ -21,6 +21,8 @@ import ParentDashboard from './pages/parent/ParentDashboard'
 import Courses from './pages/shared/Courses'
 import Assignments from './pages/shared/Assignments'
 import Attendance from './pages/shared/Attendance'
+import FaceAttendanceScan from './pages/teacher/FaceAttendanceScan'
+import AdminFaceAttendance from './pages/admin/AdminFaceAttendance'
 import Result from './pages/shared/Result'
 import Fee from './pages/shared/Fee'
 import Events from './pages/shared/Events'
@@ -101,6 +103,22 @@ export default function App() {
         <Route path="/courses" element={<Courses />} />
         <Route path="/assignments" element={<Assignments />} />
         <Route path="/attendance" element={<Attendance />} />
+        <Route
+          path="/attendance/face-scan"
+          element={
+            <RequireRole roles={['teacher', 'admin']}>
+              <FaceAttendanceScan />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="/admin/face-attendance"
+          element={
+            <RequireRole roles={['admin']}>
+              <AdminFaceAttendance />
+            </RequireRole>
+          }
+        />
         <Route path="/results" element={<Result />} />
         <Route path="/fees" element={<Fee />} />
         <Route path="/events" element={<Events />} />

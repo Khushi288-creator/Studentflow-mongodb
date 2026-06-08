@@ -5,6 +5,8 @@ import { useAuthStore } from '../../store/authStore'
 import { useAttendanceStore } from '../../store/attendanceStore'
 import { Card, CardBody, CardHeader } from '../../components/ui/Card'
 import { Page } from '../../components/ui/Page'
+import FaceAttendancePanel from '../../components/attendance/FaceAttendancePanel'
+import { Link } from 'react-router-dom'
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 function dayFromDate(dateStr: string) {
@@ -164,6 +166,15 @@ function TeacherMarkAttendance() {
 export default function Attendance() {
   const { user } = useAuthStore()
 
+  const parentChildQuery = useQuery({
+    queryKey: ['parentDashboardChild'],
+    queryFn: async () => {
+      const res = await http.get('/parents/dashboard')
+      return res.data as { child: { id: string; name: string } | null }
+    },
+    enabled: user?.role === 'parent',
+  })
+
   const attendanceQuery = useQuery({
     queryKey: ['attendance'],
     queryFn: async () => {
@@ -191,20 +202,58 @@ export default function Attendance() {
   })()
 
   return (
-    <Page title="Attendance" subtitle={user?.role === 'teacher' ? 'Mark and view attendance.' : 'Your daily attendance record.'}
+    <Page
+      title="Attendance"
+      subtitle={
+        user?.role === 'teacher'
+          ? 'Mark and view attendance.'
+          : user?.role === 'parent'
+            ? "Your child's attendance records."
+            : 'Your daily attendance record.'
+      }
       actions={
         <div className="rounded-2xl bg-indigo-600/10 px-4 py-2 text-sm font-semibold text-indigo-700 dark:text-indigo-300">
-          {user?.role === 'student' ? 'Student' : 'Teacher'}
+          {user?.role === 'student' ? 'Student' : user?.role === 'parent' ? 'Parent' : 'Teacher'}
         </div>
       }>
+
+      {user?.role === 'teacher' && (
+        <Card>
+          <CardBody className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-slate-900 dark:text-slate-50">Face Recognition Scanner</div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Open the camera to mark attendance automatically.</p>
+            </div>
+            <Link
+              to="/attendance/face-scan"
+              className="inline-flex justify-center rounded-2xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+            >
+              Open Face Scanner
+            </Link>
+          </CardBody>
+        </Card>
+      )}
 
       {/* Teacher: mark attendance section at top */}
       {user?.role === 'teacher' && <TeacherMarkAttendance />}
 
-      {/* Student: attendance records */}
+      {user?.role === 'student' && user.id && (
+        <FaceAttendancePanel studentId={user.id} subtitle="Marked via face recognition at school" />
+      )}
+
+      {user?.role === 'parent' && parentChildQuery.data?.child?.id && (
+        <FaceAttendancePanel
+          studentId={parentChildQuery.data.child.id}
+          title={`${parentChildQuery.data.child.name}'s Face Attendance`}
+          subtitle="Live updates when scanned at school"
+          pollMs={8000}
+        />
+      )}
+
+      {/* Student: course attendance records */}
       {user?.role === 'student' && (
         <Card>
-          <CardHeader title="My Attendance" subtitle="Date · Day · Status" />
+          <CardHeader title="Course Attendance" subtitle="Subject-wise records from teachers · Date · Day · Status" />
           <CardBody className="overflow-x-auto">
             <table className="min-w-full text-left text-sm">
               <thead>

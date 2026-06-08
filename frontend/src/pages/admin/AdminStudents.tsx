@@ -1,9 +1,10 @@
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { http } from '../../api/http'
 import { Card, CardBody, CardHeader } from '../../components/ui/Card'
 import { Page } from '../../components/ui/Page'
 import { useModalClose } from '../../hooks/useModalClose'
+import { registerStudentFace } from '../../lib/registerStudentFace'
 
 type StudentProfile = { gender?: string; fatherName?: string; motherName?: string; dob?: string; religion?: string; fatherOccupation?: string; address?: string; className?: string; phone?: string; photoUrl?: string }
 type StudentRow = { id: string; name: string; email: string; profile?: StudentProfile; uniqueId?: string }
@@ -20,6 +21,8 @@ export default function AdminStudents() {
   const [photoFile, setPhotoFile] = useState<File | null>(null)
   const [photoPreview, setPhotoPreview] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [faceRegistering, setFaceRegistering] = useState(false)
+  const photoInputRef = useRef<HTMLInputElement>(null)
 
   const { data, isLoading } = useQuery({
     queryKey: ['adminStudents'],
@@ -32,20 +35,28 @@ export default function AdminStudents() {
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      // Capture password before any state changes
+      if (!photoFile) throw new Error('Student photo is required for face recognition attendance.')
+
       const capturedPassword = form.password
       const res = await http.post('/admin/students', form)
       const student = (res.data as { student: { id: string; uniqueId: string } }).student
 
-      // Photo upload is optional — don't fail student creation if it errors
-      if (photoFile) {
-        try {
-          const fd = new FormData()
-          fd.append('photo', photoFile)
-          await http.post(`/admin/students/${student.id}/photo`, fd)
-        } catch {
-          // photo upload failed silently — student is still created
-        }
+      const fd = new FormData()
+      fd.append('photo', photoFile)
+      const photoRes = await http.post(`/admin/students/${student.id}/photo`, fd)
+      const uploadedUrl = (photoRes.data as { photoUrl?: string }).photoUrl ?? null
+
+      setFaceRegistering(true)
+      try {
+        await registerStudentFace({
+          studentId: student.id,
+          studentName: form.name,
+          classId: form.className || null,
+          photoFile,
+          photoUrl: uploadedUrl,
+        })
+      } finally {
+        setFaceRegistering(false)
       }
 
       return { uniqueId: student.uniqueId, password: capturedPassword }
@@ -71,7 +82,20 @@ export default function AdminStudents() {
       if (photoFile) {
         const fd = new FormData()
         fd.append('photo', photoFile)
-        await http.post(`/admin/students/${editStudent!.id}/photo`, fd)
+        const photoRes = await http.post(`/admin/students/${editStudent!.id}/photo`, fd)
+        const uploadedUrl = (photoRes.data as { photoUrl?: string }).photoUrl ?? null
+        setFaceRegistering(true)
+        try {
+          await registerStudentFace({
+            studentId: editStudent!.id,
+            studentName: form.name || editStudent!.name,
+            classId: form.className || editStudent!.profile?.className || null,
+            photoFile,
+            photoUrl: uploadedUrl,
+          })
+        } finally {
+          setFaceRegistering(false)
+        }
       }
     },
     onSuccess: () => {
@@ -114,7 +138,7 @@ export default function AdminStudents() {
   const closeModal = () => { setModalMode('none'); setEditStudent(null); setPhotoFile(null); setPhotoPreview(null); setError('') }
 
   const isOpen = modalMode !== 'none'
-  const isPending = createMutation.isPending || editMutation.isPending
+  const isPending = createMutation.isPending || editMutation.isPending || faceRegistering
   useModalClose(isOpen, closeModal)
 
   return (
@@ -178,9 +202,9 @@ export default function AdminStudents() {
 
       {/* Modal — inline JSX, NOT a nested component, so inputs don't lose focus */}
       {isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/30 dark:bg-black/50 p-4 backdrop-blur-sm"
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 dark:bg-black/60 p-4 pt-16 backdrop-blur-sm"
           onClick={closeModal}>
-          <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-950 overflow-y-auto max-h-[90vh]"
+          <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-950 my-4"
             onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
@@ -192,7 +216,11 @@ export default function AdminStudents() {
             {error && <div className="mb-3 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600 dark:bg-rose-950/30">{error}</div>}
 
             {/* Photo upload */}
-            <div className="mb-4 flex items-center gap-4">
+            <div className={`mb-4 flex items-center gap-4 rounded-2xl border-2 p-3 transition-colors ${
+              modalMode === 'create' && !photoFile
+                ? 'border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/20'
+                : 'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-900/40'
+            }`}>
               <div className="h-16 w-16 shrink-0 overflow-hidden rounded-full border-2 border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-800">
                 {photoPreview ? (
                   <img src={photoPreview} alt="Preview" className="h-full w-full object-cover" />
@@ -200,16 +228,32 @@ export default function AdminStudents() {
                   <div className="flex h-full w-full items-center justify-center text-2xl text-slate-500 dark:text-slate-400">👤</div>
                 )}
               </div>
-              <label className="cursor-pointer rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-                {photoPreview ? 'Change Photo' : 'Upload Photo'}
-                <input type="file" accept="image/*" className="hidden"
-                  onChange={e => {
-                    const file = e.target.files?.[0] ?? null
-                    setPhotoFile(file)
-                    setPhotoPreview(file ? URL.createObjectURL(file) : null)
-                  }} />
-              </label>
-              {photoFile && <span className="text-xs text-slate-500 truncate max-w-[120px]">{photoFile.name}</span>}
+              <div className="flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={() => photoInputRef.current?.click()}
+                  className="cursor-pointer rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  {photoPreview ? 'Change Photo' : modalMode === 'create' ? '📷 Upload Photo (Required)' : 'Upload Photo'}
+                </button>
+                {photoFile
+                  ? <span className="text-xs text-emerald-600 dark:text-emerald-400 truncate max-w-[180px]">✓ {photoFile.name}</span>
+                  : modalMode === 'create'
+                    ? <span className="text-xs text-amber-600 dark:text-amber-400">Required for face recognition attendance</span>
+                    : null
+                }
+              </div>
+              <input
+                ref={photoInputRef}
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onChange={e => {
+                  const file = e.target.files?.[0] ?? null
+                  setPhotoFile(file)
+                  setPhotoPreview(file ? URL.createObjectURL(file) : null)
+                }}
+              />
             </div>
 
             <div className="text-xs font-semibold text-slate-400 uppercase mb-2">Authentication</div>
@@ -304,7 +348,16 @@ export default function AdminStudents() {
               </label>
             </div>
 
-            <button type="button" disabled={isPending || (!!form.phone && form.phone.length !== 10)}
+            {modalMode === 'create' && (
+              <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                A clear front-facing photo is required — it is used to register the student&apos;s face for attendance scanning.
+              </p>
+            )}
+            {faceRegistering && (
+              <p className="mt-2 text-xs text-indigo-600 dark:text-indigo-300">Registering face with AI models...</p>
+            )}
+
+            <button type="button" disabled={isPending || (!!form.phone && form.phone.length !== 10) || (modalMode === 'create' && !photoFile)}
               onClick={() => modalMode === 'create' ? createMutation.mutate() : editMutation.mutate()}
               className="mt-5 w-full rounded-2xl bg-indigo-600 py-3 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">
               {isPending ? 'Saving...' : modalMode === 'create' ? 'Create Student' : 'Save Changes'}

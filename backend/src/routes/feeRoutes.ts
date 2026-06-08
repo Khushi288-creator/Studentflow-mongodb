@@ -1,21 +1,28 @@
 import express from 'express'
-import { prisma } from '../lib/prisma'
 import { authenticateJWT, requireRole } from '../middleware/auth'
 import { z } from 'zod'
+import { Notice } from '../models/Notice'
+import { FeeStructure } from '../models/FeeStructure'
+import { StudentProfile } from '../models/StudentProfile'
+import { StudentEnrollment } from '../models/StudentEnrollment'
+import { Course } from '../models/Course'
+import { Fee } from '../models/Fee'
+import { Teacher } from '../models/Teacher'
+import { User } from '../models/User'
+import { leanDoc } from '../utils/mongoHelpers'
 
 const router = express.Router()
 
 async function notifyStudent(userId: string, title: string, description: string) {
-  await prisma.notice.create({ data: { title, description, type: 'fee', userId } })
+  await Notice.create({ title, description, type: 'fee', userId })
 }
 
 function computeStatus(paidAmount: number, totalAmount: number): 'paid' | 'pending' | 'overdue' {
   if (paidAmount >= totalAmount) return 'paid'
-  if (paidAmount > 0) return 'overdue' // partial = overdue in FeeStatus enum
+  if (paidAmount > 0) return 'overdue'
   return 'pending'
 }
 
-// ── Admin: create fee structure + auto-assign to class ────────────────────
 const structureSchema = z.object({
   className: z.string().min(1, 'Class is required'),
   feeType: z.enum(['tuition', 'exam', 'transport']),
@@ -31,44 +38,46 @@ router.post('/admin/fees/structure', authenticateJWT, requireRole(['admin']), as
 
     const { className, feeType, amount, dueDate } = parsed.data
 
-    // Save fee structure
-    const structure = await prisma.feeStructure.create({
-      data: { className, feeType, amount, dueDate: dueDate || null },
+    const structure = await FeeStructure.create({
+      className,
+      feeType,
+      amount,
+      dueDate: dueDate || null,
     })
 
-    // Find all students of this class
-    const profiles = await prisma.studentProfile.findMany({
-      where: { className },
-      select: { userId: true },
-    })
+    const profiles = await StudentProfile.find({ className }).select('userId').lean()
 
     if (profiles.length === 0) {
-      return res.status(201).json({ structure, assigned: 0, message: 'Structure saved. No students found in this class yet.' })
+      return res.status(201).json({
+        structure: leanDoc(structure.toObject()),
+        assigned: 0,
+        message: 'Structure saved. No students found in this class yet.',
+      })
     }
 
     let assigned = 0
     for (const profile of profiles) {
-      // Get or create enrollment
-      let enrollment = await prisma.studentEnrollment.findFirst({ where: { userId: profile.userId } })
+      let enrollment = await StudentEnrollment.findOne({ userId: profile.userId }).lean()
       if (!enrollment) {
-        const course = await prisma.course.findFirst()
+        const course = await Course.findOne().lean()
         if (!course) continue
-        enrollment = await prisma.studentEnrollment.create({
-          data: { userId: profile.userId, courseId: course.id, phone: 'NA' },
+        const created = await StudentEnrollment.create({
+          userId: profile.userId,
+          courseId: course._id,
+          phone: 'NA',
         })
+        enrollment = created.toObject()
       }
 
-      await prisma.fee.create({
-        data: {
-          studentId: enrollment.id,
-          amount,
-          paidAmount: 0,
-          status: 'pending',
-          className,
-          feeType,
-          dueDate: dueDate || null,
-          description: `${feeType.charAt(0).toUpperCase() + feeType.slice(1)} Fee`,
-        },
+      await Fee.create({
+        studentId: enrollment._id,
+        amount,
+        paidAmount: 0,
+        status: 'pending',
+        className,
+        feeType,
+        dueDate: dueDate || null,
+        description: `${feeType.charAt(0).toUpperCase() + feeType.slice(1)} Fee`,
       })
 
       await notifyStudent(
@@ -79,58 +88,60 @@ router.post('/admin/fees/structure', authenticateJWT, requireRole(['admin']), as
       assigned++
     }
 
-    res.status(201).json({ structure, assigned })
+    res.status(201).json({ structure: leanDoc(structure.toObject()), assigned })
   } catch (err: any) {
     console.error('[POST /admin/fees/structure]', err?.message, err?.stack)
     res.status(500).json({ message: err?.message ?? 'Failed to create fee structure' })
   }
 })
 
-// ── Admin: get fee structures ─────────────────────────────────────────────
 router.get('/admin/fees/structures', authenticateJWT, requireRole(['admin']), async (_req, res) => {
   try {
-    const structures = await prisma.feeStructure.findMany({ orderBy: { createdAt: 'desc' } })
-    res.json({ structures })
+    const structures = await FeeStructure.find().sort({ createdAt: -1 }).lean()
+    res.json({ structures: structures.map((s) => leanDoc(s)) })
   } catch (err: any) {
     res.status(500).json({ message: err?.message ?? 'Failed' })
   }
 })
 
-// ── Admin: list all fees with filters ─────────────────────────────────────
 router.get('/admin/fees', authenticateJWT, requireRole(['admin']), async (req, res) => {
   try {
     const { className: classFilter, status: statusFilter } = req.query as Record<string, string>
 
-    const fees = await prisma.fee.findMany({
-      orderBy: { createdAt: 'desc' },
-      where: {
-        ...(classFilter && classFilter !== 'all' ? { className: classFilter } : {}),
-        ...(statusFilter && statusFilter !== 'all' ? { status: statusFilter as any } : {}),
-      },
-      include: {
-        student: {
-          include: {
-            user: { select: { id: true, name: true } },
-            course: { select: { name: true } },
-          },
-        },
-      },
-    })
+    const filter: Record<string, unknown> = {}
+    if (classFilter && classFilter !== 'all') filter.className = classFilter
+    if (statusFilter && statusFilter !== 'all') filter.status = statusFilter
+
+    const fees = await Fee.find(filter).sort({ createdAt: -1 }).lean()
+    const enrollmentIds = [...new Set(fees.map((f) => f.studentId))]
+    const enrollments = await StudentEnrollment.find({ _id: { $in: enrollmentIds } }).lean()
+    const enrollmentById = new Map(enrollments.map((e) => [e._id, e]))
+    const userIds = [...new Set(enrollments.map((e) => e.userId))]
+    const courseIds = [...new Set(enrollments.map((e) => e.courseId))]
+    const users = await User.find({ _id: { $in: userIds } }).select('name').lean()
+    const courses = await Course.find({ _id: { $in: courseIds } }).select('name').lean()
+    const userNameById = new Map(users.map((u) => [u._id, u.name]))
+    const courseNameById = new Map(courses.map((c) => [c._id, c.name]))
 
     res.json({
-      fees: fees.map(f => ({
-        id: f.id,
-        amount: f.amount,
-        paidAmount: f.paidAmount,
-        pendingAmount: Math.max(0, f.amount - f.paidAmount),
-        status: f.status,
-        className: f.className ?? f.student.course.name,
-        feeType: f.feeType,
-        description: f.description ?? '',
-        dueDate: f.dueDate ?? '',
-        studentUserId: f.student.userId,
-        studentName: f.student.user.name,
-      })),
+      fees: fees.map((f) => {
+        const enrollment = enrollmentById.get(f.studentId)
+        const studentName = enrollment ? (userNameById.get(enrollment.userId) ?? '') : ''
+        const courseName = enrollment ? (courseNameById.get(enrollment.courseId) ?? '') : ''
+        return {
+          id: f._id,
+          amount: f.amount,
+          paidAmount: f.paidAmount,
+          pendingAmount: Math.max(0, f.amount - f.paidAmount),
+          status: f.status,
+          className: f.className ?? courseName,
+          feeType: f.feeType,
+          description: f.description ?? '',
+          dueDate: f.dueDate ?? '',
+          studentUserId: enrollment?.userId ?? '',
+          studentName,
+        }
+      }),
     })
   } catch (err: any) {
     console.error('[GET /admin/fees]', err?.message)
@@ -138,7 +149,6 @@ router.get('/admin/fees', authenticateJWT, requireRole(['admin']), async (req, r
   }
 })
 
-// ── Admin: create individual fee ──────────────────────────────────────────
 const createFeeSchema = z.object({
   studentUserId: z.string().min(1),
   amount: z.number().int().positive(),
@@ -156,32 +166,33 @@ router.post('/admin/fees', authenticateJWT, requireRole(['admin']), async (req, 
 
     const { studentUserId, amount, className, feeType, description, dueDate } = parsed.data
 
-    let enrollment = await prisma.studentEnrollment.findFirst({ where: { userId: studentUserId } })
+    let enrollment = await StudentEnrollment.findOne({ userId: studentUserId }).lean()
     if (!enrollment) {
-      const course = await prisma.course.findFirst()
+      const course = await Course.findOne().lean()
       if (!course) return res.status(400).json({ message: 'No courses exist yet.' })
-      enrollment = await prisma.studentEnrollment.create({
-        data: { userId: studentUserId, courseId: course.id, phone: 'NA' },
+      const created = await StudentEnrollment.create({
+        userId: studentUserId,
+        courseId: course._id,
+        phone: 'NA',
       })
+      enrollment = created.toObject()
     }
 
     let resolvedClass = className
     if (!resolvedClass) {
-      const profile = await prisma.studentProfile.findUnique({ where: { userId: studentUserId } })
+      const profile = await StudentProfile.findOne({ userId: studentUserId }).lean()
       resolvedClass = profile?.className ?? undefined
     }
 
-    const fee = await prisma.fee.create({
-      data: {
-        studentId: enrollment.id,
-        amount,
-        paidAmount: 0,
-        status: 'pending',
-        className: resolvedClass || null,
-        feeType: feeType || 'tuition',
-        description: description || null,
-        dueDate: dueDate || null,
-      },
+    const fee = await Fee.create({
+      studentId: enrollment._id,
+      amount,
+      paidAmount: 0,
+      status: 'pending',
+      className: resolvedClass || null,
+      feeType: feeType || 'tuition',
+      description: description || null,
+      dueDate: dueDate || null,
     })
 
     await notifyStudent(
@@ -197,7 +208,6 @@ router.post('/admin/fees', authenticateJWT, requireRole(['admin']), async (req, 
   }
 })
 
-// ── Admin: update fee ─────────────────────────────────────────────────────
 const updateFeeSchema = z.object({
   status: z.enum(['paid', 'pending', 'overdue']).optional(),
   amount: z.number().int().positive().optional(),
@@ -213,47 +223,54 @@ router.put('/admin/fees/:feeId', authenticateJWT, requireRole(['admin']), async 
     const parsed = updateFeeSchema.safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ message: 'Invalid data' })
 
-    const fee = await prisma.fee.findUnique({
-      where: { id: feeId },
-      include: { student: { select: { userId: true } } },
-    })
+    const fee = await Fee.findById(feeId).lean()
     if (!fee) return res.status(404).json({ message: 'Fee not found' })
+
+    const enrollment = await StudentEnrollment.findById(fee.studentId).select('userId').lean()
+    if (!enrollment) return res.status(404).json({ message: 'Fee not found' })
 
     const newPaid = parsed.data.paidAmount ?? fee.paidAmount
     const newAmount = parsed.data.amount ?? fee.amount
     const autoStatus = computeStatus(newPaid, newAmount)
 
-    const updated = await prisma.fee.update({
-      where: { id: feeId },
-      data: {
-        ...(parsed.data.amount !== undefined && { amount: parsed.data.amount }),
-        ...(parsed.data.paidAmount !== undefined && { paidAmount: parsed.data.paidAmount }),
-        status: parsed.data.status ?? autoStatus,
-        ...(parsed.data.description !== undefined && { description: parsed.data.description || null }),
-        ...(parsed.data.className !== undefined && { className: parsed.data.className || null }),
-        ...(parsed.data.dueDate !== undefined && { dueDate: parsed.data.dueDate || null }),
+    const updateData: Record<string, unknown> = {
+      status: parsed.data.status ?? autoStatus,
+    }
+    if (parsed.data.amount !== undefined) updateData.amount = parsed.data.amount
+    if (parsed.data.paidAmount !== undefined) updateData.paidAmount = parsed.data.paidAmount
+    if (parsed.data.description !== undefined) updateData.description = parsed.data.description || null
+    if (parsed.data.className !== undefined) updateData.className = parsed.data.className || null
+    if (parsed.data.dueDate !== undefined) updateData.dueDate = parsed.data.dueDate || null
+
+    const updated = await Fee.findByIdAndUpdate(feeId, updateData, { new: true }).lean()
+    if (!updated) return res.status(404).json({ message: 'Fee not found' })
+
+    await notifyStudent(enrollment.userId, 'Fee Updated', `Your fee record has been updated by admin.`)
+    res.json({
+      fee: {
+        id: updated._id,
+        amount: updated.amount,
+        paidAmount: updated.paidAmount,
+        status: updated.status,
       },
     })
-
-    await notifyStudent(fee.student.userId, 'Fee Updated', `Your fee record has been updated by admin.`)
-    res.json({ fee: { id: updated.id, amount: updated.amount, paidAmount: updated.paidAmount, status: updated.status } })
   } catch (err: any) {
     console.error('[PUT /admin/fees/:feeId]', err?.message)
     res.status(500).json({ message: err?.message ?? 'Failed to update fee' })
   }
 })
 
-// ── Admin: delete fee ─────────────────────────────────────────────────────
 router.delete('/admin/fees/:feeId', authenticateJWT, requireRole(['admin']), async (req, res) => {
   try {
     const feeId = req.params.feeId as string
-    const fee = await prisma.fee.findUnique({
-      where: { id: feeId },
-      include: { student: { select: { userId: true } } },
-    })
+    const fee = await Fee.findById(feeId).lean()
     if (!fee) return res.status(404).json({ message: 'Fee not found' })
-    await prisma.fee.delete({ where: { id: feeId } })
-    await notifyStudent(fee.student.userId, 'Fee Removed', `A fee record of ₹${fee.amount} has been removed.`)
+
+    const enrollment = await StudentEnrollment.findById(fee.studentId).select('userId').lean()
+    if (!enrollment) return res.status(404).json({ message: 'Fee not found' })
+
+    await Fee.findByIdAndDelete(feeId)
+    await notifyStudent(enrollment.userId, 'Fee Removed', `A fee record of ₹${fee.amount} has been removed.`)
     res.json({ ok: true })
   } catch (err: any) {
     console.error('[DELETE /admin/fees/:feeId]', err?.message)
@@ -261,23 +278,16 @@ router.delete('/admin/fees/:feeId', authenticateJWT, requireRole(['admin']), asy
   }
 })
 
-// ── Student: get own fees ─────────────────────────────────────────────────
 router.get('/fees', authenticateJWT, async (req, res) => {
   try {
     const role = req.auth!.role
     if (role === 'student') {
-      const enrollments = await prisma.studentEnrollment.findMany({
-        where: { userId: req.auth!.userId },
-        select: { id: true },
-      })
-      const ids = enrollments.map(e => e.id)
-      const fees = await prisma.fee.findMany({
-        where: { studentId: { in: ids } },
-        orderBy: { createdAt: 'desc' },
-      })
+      const enrollments = await StudentEnrollment.find({ userId: req.auth!.userId }).select('_id').lean()
+      const ids = enrollments.map((e) => e._id)
+      const fees = await Fee.find({ studentId: { $in: ids } }).sort({ createdAt: -1 }).lean()
       return res.json({
-        fees: fees.map(f => ({
-          id: f.id,
+        fees: fees.map((f) => ({
+          id: f._id,
           amount: f.amount,
           paidAmount: f.paidAmount,
           pendingAmount: Math.max(0, f.amount - f.paidAmount),
@@ -291,27 +301,40 @@ router.get('/fees', authenticateJWT, async (req, res) => {
     }
 
     if (role === 'teacher') {
-      const teacher = await prisma.teacher.findUnique({ where: { userId: req.auth!.userId }, select: { id: true } })
+      const teacher = await Teacher.findOne({ userId: req.auth!.userId }).select('_id').lean()
       if (!teacher) return res.json({ fees: [] })
-      const courses = await prisma.course.findMany({ where: { teacherId: teacher.id }, select: { id: true } })
-      const courseIds = courses.map(c => c.id)
-      const enrollments = await prisma.studentEnrollment.findMany({ where: { courseId: { in: courseIds } }, select: { id: true } })
-      const ids = enrollments.map(e => e.id)
-      const fees = await prisma.fee.findMany({ where: { studentId: { in: ids } }, orderBy: { createdAt: 'desc' } })
-      return res.json({ fees: fees.map(f => ({ id: f.id, amount: f.amount, paidAmount: f.paidAmount, status: f.status })) })
+      const courses = await Course.find({ teacherId: teacher._id }).select('_id').lean()
+      const courseIds = courses.map((c) => c._id)
+      const enrollments = await StudentEnrollment.find({ courseId: { $in: courseIds } }).select('_id').lean()
+      const ids = enrollments.map((e) => e._id)
+      const fees = await Fee.find({ studentId: { $in: ids } }).sort({ createdAt: -1 }).lean()
+      return res.json({
+        fees: fees.map((f) => ({
+          id: f._id,
+          amount: f.amount,
+          paidAmount: f.paidAmount,
+          status: f.status,
+        })),
+      })
     }
 
-    const fees = await prisma.fee.findMany({ orderBy: { createdAt: 'desc' } })
-    return res.json({ fees: fees.map(f => ({ id: f.id, amount: f.amount, paidAmount: f.paidAmount, status: f.status })) })
+    const fees = await Fee.find().sort({ createdAt: -1 }).lean()
+    return res.json({
+      fees: fees.map((f) => ({
+        id: f._id,
+        amount: f.amount,
+        paidAmount: f.paidAmount,
+        status: f.status,
+      })),
+    })
   } catch (err: any) {
     res.status(500).json({ message: err?.message ?? 'Failed' })
   }
 })
 
-// ── Student: pay fee (partial or full) ───────────────────────────────────
 const paySchema = z.object({
   feeId: z.string().min(1),
-  payAmount: z.number().int().positive().optional(), // if omitted → pay full pending
+  payAmount: z.number().int().positive().optional(),
 })
 
 router.post('/fees/pay', authenticateJWT, requireRole(['student']), async (req, res) => {
@@ -320,24 +343,25 @@ router.post('/fees/pay', authenticateJWT, requireRole(['student']), async (req, 
     const parsed = paySchema.safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
 
-    const fee = await prisma.fee.findUnique({ where: { id: parsed.data.feeId } })
+    const fee = await Fee.findById(parsed.data.feeId).lean()
     if (!fee) return res.status(404).json({ message: 'Fee not found' })
 
-    const enrollment = await prisma.studentEnrollment.findUnique({
-      where: { id: fee.studentId },
-      select: { userId: true },
-    })
-    if (!enrollment || enrollment.userId !== req.auth!.userId) return res.status(403).json({ message: 'Forbidden' })
+    const enrollment = await StudentEnrollment.findById(fee.studentId).select('userId').lean()
+    if (!enrollment || enrollment.userId !== req.auth!.userId) {
+      return res.status(403).json({ message: 'Forbidden' })
+    }
 
     const pending = fee.amount - fee.paidAmount
     const paying = parsed.data.payAmount ? Math.min(parsed.data.payAmount, pending) : pending
     const newPaid = fee.paidAmount + paying
     const newStatus = computeStatus(newPaid, fee.amount)
 
-    const updated = await prisma.fee.update({
-      where: { id: fee.id },
-      data: { paidAmount: newPaid, status: newStatus },
-    })
+    const updated = await Fee.findByIdAndUpdate(
+      fee._id,
+      { paidAmount: newPaid, status: newStatus },
+      { new: true },
+    ).lean()
+    if (!updated) return res.status(404).json({ message: 'Fee not found' })
 
     await notifyStudent(
       req.auth!.userId,
@@ -345,7 +369,15 @@ router.post('/fees/pay', authenticateJWT, requireRole(['student']), async (req, 
       `₹${paying} paid${fee.className ? ` for Class ${fee.className}` : ''}. ${newStatus === 'paid' ? 'Fully paid!' : `Remaining: ₹${fee.amount - newPaid}`}`,
     )
 
-    res.json({ fee: { id: updated.id, amount: updated.amount, paidAmount: updated.paidAmount, pendingAmount: fee.amount - newPaid, status: updated.status } })
+    res.json({
+      fee: {
+        id: updated._id,
+        amount: updated.amount,
+        paidAmount: updated.paidAmount,
+        pendingAmount: fee.amount - newPaid,
+        status: updated.status,
+      },
+    })
   } catch (err: any) {
     console.error('[POST /fees/pay]', err?.message)
     res.status(500).json({ message: err?.message ?? 'Failed to process payment' })

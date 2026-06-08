@@ -26,6 +26,8 @@ import salaryRoutes from './routes/salaryRoutes'
 import skillHubRoutes from './routes/skillHubRoutes'
 import assistantRoutes from './routes/assistantRoutes'
 import parentRoutes from './routes/parentRoutes'
+import faceRoutes from './routes/faceRoutes'
+import faceAttendanceRoutes from './routes/faceAttendanceRoutes'
 
 export const app = express();
 
@@ -67,6 +69,8 @@ app.use('/api', salaryRoutes)
 app.use('/api', skillHubRoutes)
 app.use('/api', assistantRoutes)
 app.use('/api', parentRoutes)
+app.use('/api', faceRoutes)
+app.use('/api', faceAttendanceRoutes)
 
 // Basic error handler
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

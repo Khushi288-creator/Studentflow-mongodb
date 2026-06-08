@@ -1,25 +1,30 @@
 import express from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/prisma'
 import { authenticateJWT, requireRole } from '../middleware/auth'
+import { Teacher } from '../models/Teacher'
+import { User } from '../models/User'
+import { ContactMessage } from '../models/ContactMessage'
+import { Notice } from '../models/Notice'
+import { leanDoc } from '../utils/mongoHelpers'
 
 const router = express.Router()
 
 // ── Public: list teachers (any authenticated user — for dropdowns) ────────
 router.get('/teachers', authenticateJWT, async (_req, res) => {
   try {
-    const teachers = await prisma.teacher.findMany({
-      select: {
-        userId: true,
-        subject: true,
-        user: { select: { id: true, name: true } },
-      },
-      orderBy: { user: { name: 'asc' } },
-    })
+    const teachers = await Teacher.find().lean()
+    const userIds = teachers.map((t) => t.userId)
+    const users = await User.find({ _id: { $in: userIds } }).select('name').lean()
+    const userMap = Object.fromEntries(users.map((u) => [String(u._id), u]))
+
+    const sorted = [...teachers].sort((a, b) =>
+      (userMap[a.userId]?.name ?? '').localeCompare(userMap[b.userId]?.name ?? ''),
+    )
+
     res.json({
-      teachers: teachers.map(t => ({
-        id: t.user.id,
-        name: t.user.name,
+      teachers: sorted.map((t) => ({
+        id: t.userId,
+        name: userMap[t.userId]?.name ?? '—',
         subject: t.subject ?? '',
       })),
     })
@@ -41,37 +46,29 @@ router.post('/contact/teacher', authenticateJWT, requireRole(['teacher']), async
     if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
 
     const { category, message } = parsed.data
-    const teacher = await prisma.user.findUnique({
-      where: { id: req.auth!.userId },
-      select: { name: true, email: true },
+    const teacher = await User.findById(req.auth!.userId).select('name email').lean()
+
+    await ContactMessage.create({
+      userId: req.auth!.userId,
+      name: teacher?.name ?? 'Teacher',
+      email: teacher?.email ?? '',
+      message,
+      teacherId: req.auth!.userId,
+      category,
+      senderRole: 'teacher',
     })
 
-    await prisma.contactMessage.create({
-      data: {
-        userId: req.auth!.userId,
-        name: teacher?.name ?? 'Teacher',
-        email: teacher?.email ?? '',
-        message,
-        teacherId: req.auth!.userId,
-        category,
-        senderRole: 'teacher',
-      },
-    })
-
-    // Notify all admins
-    const admins = await prisma.user.findMany({ where: { role: 'admin' }, select: { id: true } })
+    const admins = await User.find({ role: 'admin' }).select('_id').lean()
     const catLabel: Record<string, string> = {
       technical: 'Technical Issue', student_issue: 'Student Issue',
       request: 'Request', other: 'Other',
     }
     for (const admin of admins) {
-      await prisma.notice.create({
-        data: {
-          title: `${catLabel[category] ?? category} from ${teacher?.name ?? 'Teacher'}`,
-          description: message.slice(0, 200),
-          type: 'notice',
-          userId: admin.id,
-        },
+      await Notice.create({
+        title: `${catLabel[category] ?? category} from ${teacher?.name ?? 'Teacher'}`,
+        description: message.slice(0, 200),
+        type: 'notice',
+        userId: String(admin._id),
       })
     }
 
@@ -97,41 +94,33 @@ router.post('/contact/student-issue', authenticateJWT, requireRole(['teacher']),
 
     const { studentId, issueType, description } = parsed.data
 
-    const student = await prisma.user.findUnique({ where: { id: studentId } })
+    const student = await User.findById(studentId).lean()
     if (!student) return res.status(404).json({ message: 'Student not found' })
 
-    const teacher = await prisma.user.findUnique({
-      where: { id: req.auth!.userId },
-      select: { name: true, email: true },
-    })
+    const teacher = await User.findById(req.auth!.userId).select('name email').lean()
 
     const issueLabel: Record<string, string> = {
       not_attending: 'Not Attending', misbehavior: 'Misbehavior',
       assignment_not_submitted: 'Assignment Not Submitted', other: 'Other',
     }
 
-    await prisma.contactMessage.create({
-      data: {
-        userId: req.auth!.userId,
-        name: teacher?.name ?? 'Teacher',
-        email: teacher?.email ?? '',
-        message: `[Student Issue — ${issueLabel[issueType]}] Student: ${student.name}\n\n${description}`,
-        teacherId: req.auth!.userId,
-        category: 'student_issue',
-        senderRole: 'teacher',
-      },
+    await ContactMessage.create({
+      userId: req.auth!.userId,
+      name: teacher?.name ?? 'Teacher',
+      email: teacher?.email ?? '',
+      message: `[Student Issue — ${issueLabel[issueType]}] Student: ${student.name}\n\n${description}`,
+      teacherId: req.auth!.userId,
+      category: 'student_issue',
+      senderRole: 'teacher',
     })
 
-    // Notify all admins
-    const admins = await prisma.user.findMany({ where: { role: 'admin' }, select: { id: true } })
+    const admins = await User.find({ role: 'admin' }).select('_id').lean()
     for (const admin of admins) {
-      await prisma.notice.create({
-        data: {
-          title: `Student Issue: ${student.name} (${issueLabel[issueType]})`,
-          description: `Reported by ${teacher?.name ?? 'Teacher'}: ${description.slice(0, 150)}`,
-          type: 'notice',
-          userId: admin.id,
-        },
+      await Notice.create({
+        title: `Student Issue: ${student.name} (${issueLabel[issueType]})`,
+        description: `Reported by ${teacher?.name ?? 'Teacher'}: ${description.slice(0, 150)}`,
+        type: 'notice',
+        userId: String(admin._id),
       })
     }
 
@@ -145,14 +134,14 @@ router.post('/contact/student-issue', authenticateJWT, requireRole(['teacher']),
 // ── Teacher: get own sent messages ────────────────────────────────────────
 router.get('/contact/teacher-messages', authenticateJWT, requireRole(['teacher']), async (req, res) => {
   try {
-    const messages = await prisma.contactMessage.findMany({
-      where: { userId: req.auth!.userId },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    })
+    const messages = await ContactMessage.find({ userId: req.auth!.userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean()
+
     res.json({
-      messages: messages.map(m => ({
-        id: m.id,
+      messages: messages.map((m) => ({
+        id: String(m._id),
         message: m.message,
         category: m.category,
         createdAt: m.createdAt.toISOString().slice(0, 10),
@@ -168,7 +157,7 @@ const sendSchema = z.object({
   teacherId: z.string().min(1, 'Please select a teacher'),
   message: z.string().min(5, 'Message must be at least 5 characters'),
   category: z.enum(['complaint', 'query', 'request'], {
-    errorMap: () => ({ message: 'Category must be complaint, query, or request' }),
+    message: 'Category must be complaint, query, or request',
   }),
 })
 
@@ -179,49 +168,37 @@ router.post('/contact', authenticateJWT, requireRole(['student']), async (req, r
 
     const { teacherId, message, category } = parsed.data
 
-    // Verify teacher exists
-    const teacher = await prisma.user.findUnique({ where: { id: teacherId } })
+    const teacher = await User.findById(teacherId).lean()
     if (!teacher || teacher.role !== 'teacher') return res.status(404).json({ message: 'Teacher not found' })
 
-    const student = await prisma.user.findUnique({
-      where: { id: req.auth!.userId },
-      select: { name: true, email: true },
+    const student = await User.findById(req.auth!.userId).select('name email').lean()
+
+    await ContactMessage.create({
+      userId: req.auth!.userId,
+      name: student?.name ?? 'Student',
+      email: student?.email ?? '',
+      message,
+      teacherId,
+      category,
+      senderRole: 'student',
     })
 
-    await prisma.contactMessage.create({
-      data: {
-        userId: req.auth!.userId,
-        name: student?.name ?? 'Student',
-        email: student?.email ?? '',
-        message,
-        teacherId,
-        category,
-        senderRole: 'student',
-      },
-    })
-
-    // Notify the teacher
     const categoryLabel = category === 'complaint' ? 'Complaint' : category === 'query' ? 'Query' : 'Request/Notice'
-    await prisma.notice.create({
-      data: {
-        title: `${categoryLabel} from ${student?.name ?? 'a student'}`,
-        description: message.slice(0, 200),
-        type: 'notice',
-        userId: teacherId,
-      },
+    await Notice.create({
+      title: `${categoryLabel} from ${student?.name ?? 'a student'}`,
+      description: message.slice(0, 200),
+      type: 'notice',
+      userId: teacherId,
     })
 
-    // If complaint, also notify admin
     if (category === 'complaint') {
-      const admins = await prisma.user.findMany({ where: { role: 'admin' }, select: { id: true } })
+      const admins = await User.find({ role: 'admin' }).select('_id').lean()
       for (const admin of admins) {
-        await prisma.notice.create({
-          data: {
-            title: `Complaint: ${student?.name ?? 'Student'} → ${teacher.name}`,
-            description: message.slice(0, 200),
-            type: 'notice',
-            userId: admin.id,
-          },
+        await Notice.create({
+          title: `Complaint: ${student?.name ?? 'Student'} → ${teacher.name}`,
+          description: message.slice(0, 200),
+          type: 'notice',
+          userId: String(admin._id),
         })
       }
     }
@@ -236,22 +213,18 @@ router.post('/contact', authenticateJWT, requireRole(['student']), async (req, r
 // ── Student: get own messages ─────────────────────────────────────────────
 router.get('/contact/my-messages', authenticateJWT, requireRole(['student']), async (req, res) => {
   try {
-    const messages = await prisma.contactMessage.findMany({
-      where: { userId: req.auth!.userId },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    })
+    const messages = await ContactMessage.find({ userId: req.auth!.userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean()
 
-    const teacherIds = [...new Set(messages.map(m => m.teacherId).filter(Boolean))] as string[]
-    const teachers = await prisma.user.findMany({
-      where: { id: { in: teacherIds } },
-      select: { id: true, name: true },
-    })
-    const teacherMap = Object.fromEntries(teachers.map(t => [t.id, t.name]))
+    const teacherIds = [...new Set(messages.map((m) => m.teacherId).filter(Boolean))] as string[]
+    const teachers = await User.find({ _id: { $in: teacherIds } }).select('name').lean()
+    const teacherMap = Object.fromEntries(teachers.map((t) => [String(t._id), t.name]))
 
     res.json({
-      messages: messages.map(m => ({
-        id: m.id,
+      messages: messages.map((m) => ({
+        id: String(m._id),
         teacherName: m.teacherId ? (teacherMap[m.teacherId] ?? '—') : '—',
         message: m.message,
         category: m.category,
@@ -266,26 +239,23 @@ router.get('/contact/my-messages', authenticateJWT, requireRole(['student']), as
 // ── Admin: view all messages (enhanced) ──────────────────────────────────
 router.get('/contact/messages', authenticateJWT, requireRole(['admin']), async (_req, res) => {
   try {
-    const messages = await prisma.contactMessage.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 200,
-    })
+    const messages = await ContactMessage.find()
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .lean()
 
-    const userIds = [...new Set(messages.map(m => m.userId).filter(Boolean))] as string[]
-    const teacherIds = [...new Set(messages.map(m => m.teacherId).filter(Boolean))] as string[]
+    const userIds = [...new Set(messages.map((m) => m.userId).filter(Boolean))] as string[]
+    const teacherIds = [...new Set(messages.map((m) => m.teacherId).filter(Boolean))] as string[]
     const allIds = [...new Set([...userIds, ...teacherIds])]
 
-    const users = await prisma.user.findMany({
-      where: { id: { in: allIds } },
-      select: { id: true, name: true, role: true },
-    })
-    const userMap = Object.fromEntries(users.map(u => [u.id, u]))
+    const users = await User.find({ _id: { $in: allIds } }).select('name role').lean()
+    const userMap = Object.fromEntries(users.map((u) => [String(u._id), u]))
 
     console.log('[GET /contact/messages] total:', messages.length)
 
     res.json({
-      messages: messages.map(m => ({
-        id: m.id,
+      messages: messages.map((m) => ({
+        id: String(m._id),
         senderName: m.name,
         senderRole: m.senderRole,
         teacherName: m.teacherId ? (userMap[m.teacherId]?.name ?? '—') : '—',
@@ -309,27 +279,26 @@ router.post('/contact/messages/:id/reply', authenticateJWT, requireRole(['admin'
     const { reply } = req.body
     if (!reply || !reply.trim()) return res.status(400).json({ message: 'Reply cannot be empty' })
 
-    const msg = await prisma.contactMessage.findUnique({ where: { id } })
+    const msg = await ContactMessage.findById(id).lean()
     if (!msg) return res.status(404).json({ message: 'Message not found' })
 
-    const updated = await prisma.contactMessage.update({
-      where: { id },
-      data: { adminReply: reply.trim(), status: 'resolved' },
-    })
+    const updated = await ContactMessage.findByIdAndUpdate(
+      id,
+      { adminReply: reply.trim(), status: 'resolved' },
+      { new: true },
+    ).lean()
 
-    // Notify the sender
     if (msg.userId) {
-      await prisma.notice.create({
-        data: {
-          title: 'Admin replied to your message',
-          description: reply.trim().slice(0, 200),
-          type: 'notice',
-          userId: msg.userId,
-        },
+      await Notice.create({
+        title: 'Admin replied to your message',
+        description: reply.trim().slice(0, 200),
+        type: 'notice',
+        userId: msg.userId,
       })
     }
 
-    res.json({ ok: true, message: { id: updated.id, status: updated.status, adminReply: updated.adminReply } })
+    const doc = leanDoc(updated)!
+    res.json({ ok: true, message: { id: doc.id, status: doc.status, adminReply: doc.adminReply } })
   } catch (err: any) {
     console.error('[POST /contact/messages/:id/reply]', err?.message)
     res.status(500).json({ message: err?.message ?? 'Failed to reply' })

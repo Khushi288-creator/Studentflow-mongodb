@@ -1,19 +1,14 @@
 import express from 'express'
 import PDFDocument from 'pdfkit'
-import { prisma } from '../lib/prisma'
 import jwt from 'jsonwebtoken'
-import { z } from 'zod'
-import OpenAI from 'openai'
+import { Result } from '../models/Result'
+import { Course } from '../models/Course'
+import { Resume } from '../models/Resume'
+import { StudentEnrollment } from '../models/StudentEnrollment'
+import { Assignment } from '../models/Assignment'
+import { Submission } from '../models/Submission'
 
 const router = express.Router()
-
-// Lazy-init OpenAI so missing key doesn't crash on startup
-let _openai: OpenAI | null = null
-function getOpenAI(): OpenAI | null {
-  if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your-openai-api-key-here') return null
-  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  return _openai
-}
 
 router.get('/reports/results.pdf', async (_req, res) => {
   const doc = new PDFDocument({ margin: 40 })
@@ -24,11 +19,10 @@ router.get('/reports/results.pdf', async (_req, res) => {
   doc.fontSize(20).text('StudentFlow - Results', { align: 'left' })
   doc.moveDown()
 
-  const results = await prisma.result.findMany({
-    orderBy: { createdAt: 'desc' },
-    take: 100,
-    include: { course: { select: { name: true } } },
-  })
+  const results = await Result.find().sort({ createdAt: -1 }).limit(100).lean()
+  const courseIds = [...new Set(results.map((r) => r.courseId))]
+  const courses = await Course.find({ _id: { $in: courseIds } }).select('name').lean()
+  const courseNameById = new Map(courses.map((c) => [c._id, c.name]))
 
   if (!results.length) {
     doc.fontSize(12).text('No stored results found yet.')
@@ -37,7 +31,8 @@ router.get('/reports/results.pdf', async (_req, res) => {
   }
 
   for (const r of results) {
-    doc.fontSize(12).text(`Course: ${r.course.name} | Marks: ${r.marks} | Grade: ${r.grade}`)
+    const courseName = courseNameById.get(r.courseId) ?? 'Unknown'
+    doc.fontSize(12).text(`Course: ${courseName} | Marks: ${r.marks} | Grade: ${r.grade}`)
   }
 
   doc.moveDown()
@@ -54,7 +49,7 @@ router.get('/reports/resume.pdf', async (_req, res) => {
   doc.fontSize(20).text('StudentFlow - Resume', { align: 'left' })
   doc.moveDown()
 
-  const resume = await prisma.resume.findFirst({ orderBy: { id: 'desc' } })
+  const resume = await Resume.findOne().sort({ _id: -1 }).lean()
   if (!resume) {
     doc.fontSize(12).text('No resume found yet.')
     doc.end()
@@ -71,8 +66,6 @@ router.get('/reports/resume.pdf', async (_req, res) => {
   doc.fontSize(10).text(`Generated at: ${new Date().toISOString()}`)
   doc.end()
 })
-
-// --- Smart Extras ---
 
 function optionalAuthRole(req: express.Request): { userId: string; role: string } | null {
   const header = req.headers.authorization
@@ -94,25 +87,28 @@ router.get('/assistant/recommendations', async (req, res) => {
     return res.json({ recommendations: ['Log in as student to get personalized recommendations.'] })
   }
 
-  const enrollments = await prisma.studentEnrollment.findMany({
-    where: { userId: auth.userId },
-    select: { id: true, courseId: true },
-  })
-  const studentIds = enrollments.map((e) => e.id)
+  const enrollments = await StudentEnrollment.find({ userId: auth.userId })
+    .select('_id courseId')
+    .lean()
+  const studentIds = enrollments.map((e) => e._id)
   const courseIds = enrollments.map((e) => e.courseId)
 
   const now = new Date()
-  const assignments = await prisma.assignment.findMany({
-    where: { courseId: { in: courseIds }, dueDate: { gte: now } },
-    select: { id: true, courseId: true },
+  const assignments = await Assignment.find({
+    courseId: { $in: courseIds },
+    dueDate: { $gte: now },
   })
+    .select('_id courseId')
+    .lean()
 
   let pending = 0
   for (const a of assignments) {
-    const hasSubmission = await prisma.submission.findFirst({
-      where: { assignmentId: a.id, studentId: { in: studentIds } },
-      select: { id: true },
+    const hasSubmission = await Submission.findOne({
+      assignmentId: a._id,
+      studentId: { $in: studentIds },
     })
+      .select('_id')
+      .lean()
     if (!hasSubmission) pending += 1
   }
 

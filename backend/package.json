@@ -6,6 +6,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "seed": "ts-node --transpile-only src/seed.ts",
+    "migrate:sqlite-to-mongo": "ts-node --transpile-only scripts/migrate-sqlite-to-mongo.ts",
     "prisma:migrate": "prisma migrate dev --name init --skip-seed",
     "prisma:studio": "prisma studio"
   },

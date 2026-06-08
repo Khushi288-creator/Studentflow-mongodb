@@ -1,5 +1,6 @@
 import express from 'express'
-import { prisma } from '../lib/prisma'
+import { Notice } from '../models/Notice'
+import { NoticeRead } from '../models/NoticeRead'
 import { authenticateJWT } from '../middleware/auth'
 
 const router = express.Router()
@@ -8,27 +9,23 @@ const router = express.Router()
 router.get('/notifications', authenticateJWT, async (req, res) => {
   const userId = req.auth!.userId
 
-  const notices = await prisma.notice.findMany({
-    where: { OR: [{ userId }, { userId: null }] },
-    orderBy: { date: 'desc' },
-    take: 50,
-  })
+  const notices = await Notice.find({ $or: [{ userId }, { userId: null }] })
+    .sort({ date: -1 })
+    .limit(50)
+    .lean()
 
-  const reads = await prisma.noticeRead.findMany({
-    where: { userId },
-    select: { noticeId: true, readAt: true },
-  })
+  const reads = await NoticeRead.find({ userId }).select('noticeId readAt').lean()
   const readMap = new Map(reads.map((r) => [r.noticeId, r.readAt]))
 
   res.json({
     notifications: notices.map((n) => ({
-      id: n.id,
+      id: n._id,
       title: n.title,
       description: n.description,
       type: n.type,
       date: n.date.toISOString().slice(0, 10),
       createdAt: n.date.toISOString(),
-      readAt: readMap.get(n.id) ? new Date(readMap.get(n.id) as Date).toISOString() : undefined,
+      readAt: readMap.get(n._id) ? new Date(readMap.get(n._id) as Date).toISOString() : undefined,
     })),
   })
 })
@@ -37,11 +34,8 @@ router.get('/notifications', authenticateJWT, async (req, res) => {
 router.get('/notifications/unread-count', authenticateJWT, async (req, res) => {
   const userId = req.auth!.userId
 
-  const total = await prisma.notice.count({
-    where: { OR: [{ userId }, { userId: null }] },
-  })
-
-  const read = await prisma.noticeRead.count({ where: { userId } })
+  const total = await Notice.countDocuments({ $or: [{ userId }, { userId: null }] })
+  const read = await NoticeRead.countDocuments({ userId })
 
   res.json({ count: Math.max(0, total - read) })
 })
@@ -50,17 +44,14 @@ router.get('/notifications/unread-count', authenticateJWT, async (req, res) => {
 router.post('/notifications/mark-read', authenticateJWT, async (req, res) => {
   const userId = req.auth!.userId
 
-  const notices = await prisma.notice.findMany({
-    where: { OR: [{ userId }, { userId: null }] },
-    select: { id: true },
-  })
+  const notices = await Notice.find({ $or: [{ userId }, { userId: null }] }).select('_id').lean()
 
   for (const n of notices) {
-    await prisma.noticeRead.upsert({
-      where: { noticeId_userId: { noticeId: n.id, userId } },
-      update: {},
-      create: { noticeId: n.id, userId },
-    })
+    await NoticeRead.findOneAndUpdate(
+      { noticeId: n._id, userId },
+      { $setOnInsert: { readAt: new Date() } },
+      { upsert: true },
+    )
   }
 
   res.json({ ok: true })

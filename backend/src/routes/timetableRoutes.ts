@@ -1,6 +1,9 @@
 import express from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/prisma'
+import { Timetable } from '../models/Timetable'
+import { User } from '../models/User'
+import { Notice } from '../models/Notice'
+import { leanDoc, leanDocs } from '../utils/mongoHelpers'
 import { authenticateJWT, requireRole } from '../middleware/auth'
 
 const router = express.Router()
@@ -17,11 +20,9 @@ const timetableSchema = z.object({
 // GET — all (teacher sees own, student sees by class, admin sees all)
 router.get('/timetable', authenticateJWT, async (req, res) => {
   const type = (req.query.type as string | undefined) ?? undefined
-  const entries = await prisma.timetable.findMany({
-    where: type ? { type } : undefined,
-    orderBy: { createdAt: 'asc' },
-  })
-  res.json({ entries })
+  const filter = type ? { type } : {}
+  const entries = await Timetable.find(filter).sort({ createdAt: 1 }).lean()
+  res.json({ entries: leanDocs(entries) })
 })
 
 // Admin: create
@@ -30,19 +31,21 @@ router.post('/timetable', authenticateJWT, requireRole(['admin']), async (req, r
     const parsed = timetableSchema.safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
 
-    const entry = await prisma.timetable.create({ data: parsed.data })
+    const created = await Timetable.create(parsed.data)
+    const entry = leanDoc(created.toObject())
 
-    const teachers = await prisma.user.findMany({ where: { role: 'teacher' }, select: { id: true } })
-    const students = await prisma.user.findMany({ where: { role: 'student' }, select: { id: true } })
-    for (const u of [...teachers, ...students]) {
-      await prisma.notice.create({
-        data: {
+    const teachers = await User.find({ role: 'teacher' }).select('_id').lean()
+    const students = await User.find({ role: 'student' }).select('_id').lean()
+    const recipients = [...teachers, ...students]
+    if (recipients.length) {
+      await Notice.insertMany(
+        recipients.map((u) => ({
           title: 'Timetable Updated',
           description: `New ${parsed.data.type} timetable entry: ${parsed.data.subject} — Class ${parsed.data.class} at ${parsed.data.time}${parsed.data.date ? ' on ' + parsed.data.date : ''}`,
           type: 'timetable',
-          userId: u.id,
-        },
-      })
+          userId: u._id,
+        })),
+      )
     }
     res.status(201).json({ entry })
   } catch (err: any) {
@@ -58,18 +61,20 @@ router.put('/timetable/:id', authenticateJWT, requireRole(['admin']), async (req
     const parsed = timetableSchema.partial().safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
 
-    const entry = await prisma.timetable.update({ where: { id }, data: parsed.data })
+    const updated = await Timetable.findOneAndUpdate({ _id: id }, parsed.data, { new: true }).lean()
+    if (!updated) throw new Error('Timetable entry not found')
+    const entry = leanDoc(updated)
 
-    const users = await prisma.user.findMany({ where: { role: { in: ['teacher', 'student'] } }, select: { id: true } })
-    for (const u of users) {
-      await prisma.notice.create({
-        data: {
+    const users = await User.find({ role: { $in: ['teacher', 'student'] } }).select('_id').lean()
+    if (users.length) {
+      await Notice.insertMany(
+        users.map((u) => ({
           title: 'Timetable Updated',
           description: `Timetable changed: ${entry.subject} — Class ${entry.class} at ${entry.time}`,
           type: 'timetable',
-          userId: u.id,
-        },
-      })
+          userId: u._id,
+        })),
+      )
     }
     res.json({ entry })
   } catch (err: any) {
@@ -82,7 +87,8 @@ router.put('/timetable/:id', authenticateJWT, requireRole(['admin']), async (req
 router.delete('/timetable/:id', authenticateJWT, requireRole(['admin']), async (req, res) => {
   try {
     const id = req.params.id as string
-    await prisma.timetable.delete({ where: { id } })
+    const deleted = await Timetable.findOneAndDelete({ _id: id })
+    if (!deleted) throw new Error('Timetable entry not found')
     res.json({ ok: true })
   } catch (err: any) {
     console.error('[DELETE /timetable/:id]', err?.message)

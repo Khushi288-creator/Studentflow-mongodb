@@ -1,20 +1,28 @@
 import express from 'express'
-import { prisma } from '../lib/prisma'
 import { authenticateJWT, requireRole } from '../middleware/auth'
 import { z } from 'zod'
 import bcrypt from 'bcrypt'
 import PDFDocument from 'pdfkit'
+import { StudentFace } from '../models/StudentFace'
+import { FaceAttendance } from '../models/FaceAttendance'
+import { User } from '../models/User'
+import { StudentProfile } from '../models/StudentProfile'
+import { Teacher } from '../models/Teacher'
+import { Course } from '../models/Course'
+import { Notice } from '../models/Notice'
+import { Event } from '../models/Event'
+import { EventRegistration } from '../models/EventRegistration'
+import { leanDoc } from '../utils/mongoHelpers'
 
 const router = express.Router()
 
 // ── Helper: generate unique ID ────────────────────────────────────────────
 async function generateUniqueId(role: 'student' | 'teacher' | 'admin'): Promise<string> {
   const prefix = role === 'student' ? 'STU' : role === 'teacher' ? 'TCH' : 'ADM'
-  const count = await prisma.user.count({ where: { role } })
+  const count = await User.countDocuments({ role })
   let num = count + 1
   let uniqueId = `${prefix}${String(num).padStart(3, '0')}`
-  // Ensure no collision
-  while (await prisma.user.findUnique({ where: { email: `${uniqueId}@school.local` } })) {
+  while (await User.findOne({ email: `${uniqueId}@school.local` }).lean()) {
     num++
     uniqueId = `${prefix}${String(num).padStart(3, '0')}`
   }
@@ -23,28 +31,30 @@ async function generateUniqueId(role: 'student' | 'teacher' | 'admin'): Promise<
 
 // ── GET students ──────────────────────────────────────────────────────────
 router.get('/admin/students', authenticateJWT, requireRole(['admin']), async (_req, res) => {
-  const users = await prisma.user.findMany({
-    where: { role: 'student' },
-    select: { id: true, name: true, email: true, role: true, studentProfile: true },
-  })
+  const users = await User.find({ role: 'student' })
+    .select('name email role')
+    .lean()
+  const profiles = await StudentProfile.find({
+    userId: { $in: users.map((u) => u._id) },
+  }).lean()
+  const profileByUser = new Map(profiles.map((p) => [p.userId, p]))
+
   res.json({
     students: users.map((u) => ({
-      id: u.id, name: u.name, email: u.email, role: u.role,
+      id: u._id,
+      name: u.name,
+      email: u.email,
+      role: u.role,
       uniqueId: u.email.endsWith('@school.local') ? u.email.replace('@school.local', '') : null,
-      profile: u.studentProfile,
+      profile: profileByUser.get(u._id) ? leanDoc(profileByUser.get(u._id)!) : null,
     })),
   })
 })
 
 // ── GET distinct classes ──────────────────────────────────────────────────
 router.get('/admin/classes', authenticateJWT, async (_req, res) => {
-  const profiles = await prisma.studentProfile.findMany({
-    where: { className: { not: null } },
-    select: { className: true },
-    distinct: ['className'],
-  })
-  const classes = profiles.map(p => p.className).filter(Boolean).sort()
-  res.json({ classes })
+  const classes = await StudentProfile.distinct('className', { className: { $ne: null } })
+  res.json({ classes: (classes as string[]).filter(Boolean).sort() })
 })
 
 // ── CREATE student ────────────────────────────────────────────────────────
@@ -72,15 +82,11 @@ router.post('/admin/students', authenticateJWT, requireRole(['admin']), async (r
     const email = `${uniqueId}@school.local`
 
     const hash = await bcrypt.hash(password, 12)
-    const user = await prisma.user.create({
-      data: { name, email, password: hash, role: 'student' },
-    })
-    await prisma.studentProfile.create({
-      data: {
-        userId: user.id,
-        ...profile,
-        phone: profile.phone || null,
-      },
+    const user = await User.create({ name, email, password: hash, role: 'student' })
+    await StudentProfile.create({
+      userId: user.id,
+      ...profile,
+      phone: profile.phone || null,
     })
     res.status(201).json({ student: { id: user.id, name, uniqueId, loginId: uniqueId } })
   } catch (err: any) {
@@ -110,7 +116,6 @@ router.put('/admin/students/:id', authenticateJWT, requireRole(['admin']), async
       phone,
     } = req.body
 
-    // ── Validate ────────────────────────────────────────────────────────
     if (name !== undefined && (typeof name !== 'string' || name.trim().length < 2)) {
       return res.status(400).json({ message: 'Name must be at least 2 characters' })
     }
@@ -130,7 +135,6 @@ router.put('/admin/students/:id', authenticateJWT, requireRole(['admin']), async
       return res.status(400).json({ message: 'Password must be at least 6 characters' })
     }
 
-    // ── Update User (name + optional password) ──────────────────────────
     const userUpdate: Record<string, any> = {}
     if (name && name.trim()) userUpdate.name = name.trim()
     if (password && password.trim().length >= 6) {
@@ -138,27 +142,26 @@ router.put('/admin/students/:id', authenticateJWT, requireRole(['admin']), async
     }
 
     if (Object.keys(userUpdate).length > 0) {
-      await prisma.user.update({ where: { id: userId }, data: userUpdate })
+      await User.findByIdAndUpdate(userId, userUpdate)
     }
 
-    // ── Build profile update — never pass undefined to Prisma ───────────
     const profileData = {
-      gender:           gender           || null,
-      fatherName:       fatherName       || null,
-      motherName:       motherName       || null,
-      dob:              dob              || null,
-      religion:         religion         || null,
+      gender: gender || null,
+      fatherName: fatherName || null,
+      motherName: motherName || null,
+      dob: dob || null,
+      religion: religion || null,
       fatherOccupation: fatherOccupation || null,
-      address:          address          || null,
-      className:        className        || null,
-      phone:            (phone && phone.trim()) ? phone.trim() : null,
+      address: address || null,
+      className: className || null,
+      phone: phone && phone.trim() ? phone.trim() : null,
     }
 
-    await prisma.studentProfile.upsert({
-      where:  { userId },
-      update: profileData,
-      create: { userId, ...profileData },
-    })
+    await StudentProfile.findOneAndUpdate(
+      { userId },
+      { $set: profileData, $setOnInsert: { userId } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    )
 
     res.json({ ok: true })
   } catch (err: any) {
@@ -170,26 +173,33 @@ router.put('/admin/students/:id', authenticateJWT, requireRole(['admin']), async
 // ── DELETE student ────────────────────────────────────────────────────────
 router.delete('/admin/students/:id', authenticateJWT, requireRole(['admin']), async (req, res) => {
   const userId = req.params.id as string
-  await prisma.user.delete({ where: { id: userId } })
+  await Promise.all([
+    StudentFace.deleteOne({ studentId: userId }).catch(() => undefined),
+    FaceAttendance.deleteMany({ studentId: userId }).catch(() => undefined),
+  ])
+  await User.findByIdAndDelete(userId)
   res.json({ ok: true })
 })
 
 // ── GET teachers ──────────────────────────────────────────────────────────
 router.get('/admin/teachers', authenticateJWT, requireRole(['admin']), async (_req, res) => {
-  const users = await prisma.user.findMany({
-    where: { role: 'teacher' },
-    select: {
-      id: true, name: true, email: true, role: true,
-      teacher: { select: { id: true, subject: true, phone: true, address: true, bloodType: true, birthday: true, sex: true, photoUrl: true } },
-    },
-  })
+  const users = await User.find({ role: 'teacher' }).select('name email role').lean()
+  const teachers = await Teacher.find({ userId: { $in: users.map((u) => u._id) } }).lean()
+  const teacherByUser = new Map(teachers.map((t) => [t.userId, t]))
+
   res.json({
-    teachers: users.map((u) => ({
-      id: u.id, name: u.name, email: u.email, role: u.role,
-      uniqueId: u.email.endsWith('@school.local') ? u.email.replace('@school.local', '') : null,
-      subject: u.teacher?.subject ?? null,
-      profile: u.teacher,
-    })),
+    teachers: users.map((u) => {
+      const teacher = teacherByUser.get(u._id)
+      return {
+        id: u._id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        uniqueId: u.email.endsWith('@school.local') ? u.email.replace('@school.local', '') : null,
+        subject: teacher?.subject ?? null,
+        profile: teacher ? leanDoc(teacher) : null,
+      }
+    }),
   })
 })
 
@@ -214,24 +224,12 @@ router.post('/admin/teachers', authenticateJWT, requireRole(['admin']), async (r
   const email = `${uniqueId}@school.local`
 
   const hash = await bcrypt.hash(password, 12)
-  const user = await prisma.user.create({
-    data: { name, email, password: hash, role: 'teacher' },
-  })
-  await prisma.teacher.create({
-    data: { userId: user.id, subject, ...profile },
-  })
+  const user = await User.create({ name, email, password: hash, role: 'teacher' })
+  const teacherProfile = await Teacher.create({ userId: user.id, subject, ...profile })
 
-  // Auto-create the subject in courses so it appears in AdminSubjects
-  const teacherProfile = await prisma.teacher.findUnique({ where: { userId: user.id } })
-  if (teacherProfile) {
-    const existing = await prisma.course.findFirst({
-      where: { name: subject, teacherId: teacherProfile.id },
-    })
-    if (!existing) {
-      await prisma.course.create({
-        data: { name: subject, teacherId: teacherProfile.id },
-      })
-    }
+  const existing = await Course.findOne({ name: subject, teacherId: teacherProfile.id })
+  if (!existing) {
+    await Course.create({ name: subject, teacherId: teacherProfile.id })
   }
 
   res.status(201).json({ teacher: { id: user.id, name, uniqueId, loginId: uniqueId, subject } })
@@ -242,32 +240,41 @@ router.put('/admin/teachers/:id', authenticateJWT, requireRole(['admin']), async
   const userId = req.params.id as string
   const { name, subject, phone, address, bloodType, birthday, sex } = req.body
 
-  if (name) await prisma.user.update({ where: { id: userId }, data: { name } })
-  await prisma.teacher.upsert({
-    where: { userId },
-    update: { subject, phone, address, bloodType, birthday, sex },
-    create: { userId, subject: subject ?? 'General', phone, address, bloodType, birthday, sex },
-  })
+  if (name) await User.findByIdAndUpdate(userId, { name })
+  await Teacher.findOneAndUpdate(
+    { userId },
+    {
+      $set: { subject, phone, address, bloodType, birthday, sex },
+      $setOnInsert: { userId, subject: subject ?? 'General' },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  )
   res.json({ ok: true })
 })
 
 // ── DELETE teacher ────────────────────────────────────────────────────────
 router.delete('/admin/teachers/:id', authenticateJWT, requireRole(['admin']), async (req, res) => {
   const userId = req.params.id as string
-  await prisma.user.delete({ where: { id: userId } })
+  await User.findByIdAndDelete(userId)
   res.json({ ok: true })
 })
 
 router.get('/admin/courses', authenticateJWT, requireRole(['admin']), async (_req, res) => {
-  const courses = await prisma.course.findMany({
-    include: { teacher: { include: { user: { select: { name: true } } } } },
-  })
+  const courses = await Course.find().lean()
+  const teacherIds = [...new Set(courses.map((c) => c.teacherId))]
+  const teachers = await Teacher.find({ _id: { $in: teacherIds } }).lean()
+  const users = await User.find({ _id: { $in: teachers.map((t) => t.userId) } })
+    .select('name')
+    .lean()
+  const teacherById = new Map(teachers.map((t) => [t._id, t]))
+  const userNameById = new Map(users.map((u) => [u._id, u.name]))
+
   res.json({
-    courses: courses.map((c) => ({
-      id: c.id,
-      name: c.name,
-      teacherName: c.teacher.user.name,
-    })),
+    courses: courses.map((c) => {
+      const teacher = teacherById.get(c.teacherId)
+      const teacherName = teacher ? (userNameById.get(teacher.userId) ?? '') : ''
+      return { id: c._id, name: c.name, teacherName }
+    }),
   })
 })
 
@@ -282,14 +289,12 @@ router.post('/admin/courses', authenticateJWT, requireRole(['admin']), async (re
     if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
 
     const { name, teacherId } = parsed.data
-    const teacherProfile = await prisma.teacher.findUnique({ where: { userId: teacherId } })
+    const teacherProfile = await Teacher.findOne({ userId: teacherId }).lean()
     if (!teacherProfile) return res.status(404).json({ message: 'Teacher not found' })
 
-    const course = await prisma.course.create({
-      data: { name, teacherId: teacherProfile.id },
-    })
+    const course = await Course.create({ name, teacherId: teacherProfile._id })
 
-    res.status(201).json({ course })
+    res.status(201).json({ course: leanDoc(course.toObject()) })
   } catch (err) {
     console.error('[POST /admin/courses]', err)
     res.status(500).json({ message: 'Failed to create course' })
@@ -306,10 +311,12 @@ router.post('/admin/notices', authenticateJWT, requireRole(['admin']), async (re
     const parsed = noticesSchema.safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
 
-    const notice = await prisma.notice.create({
-      data: { title: parsed.data.title, description: parsed.data.description, date: new Date() },
+    const notice = await Notice.create({
+      title: parsed.data.title,
+      description: parsed.data.description,
+      date: new Date(),
     })
-    res.status(201).json({ notice })
+    res.status(201).json({ notice: leanDoc(notice.toObject()) })
   } catch (err) {
     console.error('[POST /admin/notices]', err)
     res.status(500).json({ message: 'Failed to create notice' })
@@ -324,11 +331,11 @@ router.get('/admin/reports/summary.pdf', async (_req, res) => {
 
   doc.pipe(res)
 
-  const totalStudents = await prisma.user.count({ where: { role: 'student' } })
-  const totalTeachers = await prisma.user.count({ where: { role: 'teacher' } })
-  const activeCourses = await prisma.course.count()
-  const totalEvents = await prisma.event.count()
-  const registrations = await prisma.eventRegistration.count()
+  const totalStudents = await User.countDocuments({ role: 'student' })
+  const totalTeachers = await User.countDocuments({ role: 'teacher' })
+  const activeCourses = await Course.countDocuments()
+  const totalEvents = await Event.countDocuments()
+  const registrations = await EventRegistration.countDocuments()
 
   doc.fontSize(22).text('Admin Summary Report', { align: 'left' })
   doc.moveDown()
@@ -344,4 +351,3 @@ router.get('/admin/reports/summary.pdf', async (_req, res) => {
 })
 
 export default router
-

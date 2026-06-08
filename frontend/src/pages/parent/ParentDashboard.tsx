@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { http } from '../../api/http'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import FaceAttendancePanel from '../../components/attendance/FaceAttendancePanel'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 type Child = { id: string; name: string; className: string | null; photoUrl: string | null; gender: string | null }
@@ -267,6 +268,13 @@ export default function ParentDashboard() {
                 )}
               </HoverCard>
             </div>
+
+            <FaceAttendancePanel
+              studentId={d.child.id}
+              title="Face Recognition Attendance"
+              subtitle="Updates automatically when your child is scanned at school"
+              pollMs={8000}
+            />
 
             {/* Performance Graph */}
             {d.performance.length > 0 ? (

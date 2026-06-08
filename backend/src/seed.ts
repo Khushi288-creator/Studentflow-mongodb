@@ -1,22 +1,23 @@
 import 'dotenv/config'
 import bcrypt from 'bcrypt'
-import { prisma } from './lib/prisma'
+import connectDB from './config/db'
+import { User } from './models/User'
 
 async function main() {
+  await connectDB()
+
   const email = 'admin@school.com'
   const password = 'admin123'
   const name = 'Admin'
 
-  const existing = await prisma.user.findUnique({ where: { email } })
+  const existing = await User.findOne({ email }).lean()
   if (existing) {
     console.log(`Admin already exists: ${email}`)
     return
   }
 
   const hash = await bcrypt.hash(password, 12)
-  await prisma.user.create({
-    data: { name, email, password: hash, role: 'admin' },
-  })
+  await User.create({ name, email, password: hash, role: 'admin' })
 
   console.log('✅ Admin created successfully')
   console.log(`   Email   : ${email}`)
@@ -25,4 +26,4 @@ async function main() {
 
 main()
   .catch(console.error)
-  .finally(() => prisma.$disconnect())
+  .finally(() => process.exit(0))

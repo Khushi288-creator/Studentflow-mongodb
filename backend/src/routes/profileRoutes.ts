@@ -1,28 +1,35 @@
 import express from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/prisma'
 import { authenticateJWT } from '../middleware/auth'
 import { photoUpload } from '../utils/upload'
+import { User } from '../models/User'
+import { StudentProfile } from '../models/StudentProfile'
+import { Teacher } from '../models/Teacher'
+import { Course } from '../models/Course'
+import { Attendance } from '../models/Attendance'
+import { Assignment } from '../models/Assignment'
+import { Resume } from '../models/Resume'
+import { StudyTask } from '../models/StudyTask'
+import { Doubt } from '../models/Doubt'
+import { Notice } from '../models/Notice'
+import { leanDoc } from '../utils/mongoHelpers'
 
 const router = express.Router()
 
-// NOTE: GET /me is handled by authRoutes.ts — no duplicate here.
-
-// ── List all students (teacher + admin — for dropdowns) ───────────────────
 router.get('/students', authenticateJWT, async (req, res) => {
   try {
     const role = req.auth!.role
     if (role !== 'teacher' && role !== 'admin') return res.status(403).json({ message: 'Forbidden' })
-    const users = await prisma.user.findMany({
-      where: { role: 'student' },
-      select: { id: true, name: true, studentProfile: { select: { className: true } } },
-      orderBy: { name: 'asc' },
-    })
+    const users = await User.find({ role: 'student' }).select('name').sort({ name: 1 }).lean()
+    const profiles = await StudentProfile.find({ userId: { $in: users.map((u) => u._id) } })
+      .select('userId className')
+      .lean()
+    const classNameByUser = new Map(profiles.map((p) => [p.userId, p.className]))
     res.json({
-      students: users.map(u => ({
-        id: u.id,
+      students: users.map((u) => ({
+        id: u._id,
         name: u.name,
-        className: u.studentProfile?.className ?? null,
+        className: classNameByUser.get(u._id) ?? null,
       })),
     })
   } catch (err: any) {
@@ -30,11 +37,8 @@ router.get('/students', authenticateJWT, async (req, res) => {
   }
 })
 
-// Student bio — used by StudentBioCard on dashboard
 router.get('/students/me', authenticateJWT, async (req, res) => {
-  const profile = await prisma.studentProfile.findUnique({
-    where: { userId: req.auth!.userId },
-  })
+  const profile = await StudentProfile.findOne({ userId: req.auth!.userId }).lean()
   res.json({
     student: profile
       ? {
@@ -53,85 +57,73 @@ router.get('/students/me', authenticateJWT, async (req, res) => {
   })
 })
 
-// Teacher bio — used by TeacherDashboard bio card
 router.get('/teachers/me', authenticateJWT, async (req, res) => {
-  const teacher = await prisma.teacher.findUnique({
-    where: { userId: req.auth!.userId },
-    select: { subject: true, phone: true, address: true, bloodType: true, birthday: true, sex: true, photoUrl: true },
-  })
+  const teacher = await Teacher.findOne({ userId: req.auth!.userId })
+    .select('subject phone address bloodType birthday sex photoUrl')
+    .lean()
   res.json({ teacher: teacher ?? null })
 })
 
-// ── Admin: upload photo for student ──────────────────────────────────────
 router.post('/admin/students/:userId/photo', authenticateJWT, photoUpload.single('photo'), async (req, res) => {
   const userId = req.params.userId as string
   const file = req.file
   if (!file) return res.status(400).json({ message: 'No file uploaded' })
   const photoUrl = `/uploads/photos/${file.filename}`
-  await prisma.studentProfile.upsert({
-    where: { userId },
-    update: { photoUrl },
-    create: { userId, photoUrl },
-  })
+  await StudentProfile.findOneAndUpdate(
+    { userId },
+    { $set: { photoUrl }, $setOnInsert: { userId } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  )
   res.json({ photoUrl })
 })
 
-// ── Admin: upload photo for teacher ──────────────────────────────────────
 router.post('/admin/teachers/:userId/photo', authenticateJWT, photoUpload.single('photo'), async (req, res) => {
   const userId = req.params.userId as string
   const file = req.file
   if (!file) return res.status(400).json({ message: 'No file uploaded' })
   const photoUrl = `/uploads/photos/${file.filename}`
-  const teacher = await prisma.teacher.findUnique({ where: { userId }, select: { id: true } })
+  const teacher = await Teacher.findOne({ userId }).select('_id').lean()
   if (!teacher) return res.status(404).json({ message: 'Teacher not found' })
-  await prisma.teacher.update({ where: { userId }, data: { photoUrl } })
+  await Teacher.findOneAndUpdate({ userId }, { photoUrl })
   res.json({ photoUrl })
 })
 
-// Teacher recent activity
 router.get('/teachers/me/activity', authenticateJWT, async (req, res) => {
-  const teacher = await prisma.teacher.findUnique({
-    where: { userId: req.auth!.userId },
-    select: { id: true },
-  })
+  const teacher = await Teacher.findOne({ userId: req.auth!.userId }).select('_id').lean()
   if (!teacher) return res.json({ lastAttendance: null, lastAssignment: null })
 
-  const courses = await prisma.course.findMany({
-    where: { teacherId: teacher.id },
-    select: { id: true },
-  })
-  const courseIds = courses.map(c => c.id)
+  const courses = await Course.find({ teacherId: teacher._id }).select('_id name').lean()
+  const courseIds = courses.map((c) => c._id)
+  const courseNameById = new Map(courses.map((c) => [c._id, c.name]))
 
-  const lastAttendance = await prisma.attendance.findFirst({
-    where: { courseId: { in: courseIds } },
-    orderBy: { createdAt: 'desc' },
-    include: { course: { select: { name: true } } },
-  })
+  const lastAttendance = await Attendance.findOne({ courseId: { $in: courseIds } })
+    .sort({ createdAt: -1 })
+    .lean()
 
-  const lastAssignment = await prisma.assignment.findFirst({
-    where: { courseId: { in: courseIds } },
-    orderBy: { createdAt: 'desc' },
-    include: { course: { select: { name: true } } },
-  })
+  const lastAssignment = await Assignment.findOne({ courseId: { $in: courseIds } })
+    .sort({ createdAt: -1 })
+    .lean()
 
   res.json({
-    lastAttendance: lastAttendance ? {
-      date: lastAttendance.date.toISOString().slice(0, 10),
-      subject: lastAttendance.course.name,
-    } : null,
-    lastAssignment: lastAssignment ? {
-      title: lastAssignment.title,
-      subject: lastAssignment.course.name,
-      date: lastAssignment.createdAt.toISOString().slice(0, 10),
-    } : null,
+    lastAttendance: lastAttendance
+      ? {
+          date: new Date(lastAttendance.date).toISOString().slice(0, 10),
+          subject: courseNameById.get(lastAttendance.courseId) ?? '',
+        }
+      : null,
+    lastAssignment: lastAssignment
+      ? {
+          title: lastAssignment.title,
+          subject: courseNameById.get(lastAssignment.courseId) ?? '',
+          date: new Date(lastAssignment.createdAt).toISOString().slice(0, 10),
+        }
+      : null,
   })
 })
 
 router.get('/resume', authenticateJWT, async (req, res) => {
-  const resume = await prisma.resume.findUnique({
-    where: { userId: req.auth!.userId },
-  })
-  res.json({ resume: resume ?? { headline: '', summary: '', skills: '' } })
+  const resume = await Resume.findOne({ userId: req.auth!.userId }).lean()
+  res.json({ resume: resume ? leanDoc(resume) : { headline: '', summary: '', skills: '' } })
 })
 
 const resumeSchema = z.object({
@@ -146,21 +138,24 @@ router.put('/resume', authenticateJWT, async (req, res) => {
 
   const { headline, summary, skills } = parsed.data
 
-  const resume = await prisma.resume.upsert({
-    where: { userId: req.auth!.userId },
-    update: { headline, summary, skills },
-    create: { userId: req.auth!.userId, headline, summary, skills },
-  })
+  const resume = await Resume.findOneAndUpdate(
+    { userId: req.auth!.userId },
+    { $set: { headline, summary, skills }, $setOnInsert: { userId: req.auth!.userId } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  )
 
-  res.json({ resume })
+  res.json({ resume: leanDoc(resume.toObject()) })
 })
 
 router.get('/study-planner', authenticateJWT, async (req, res) => {
-  const tasks = await prisma.studyTask.findMany({
-    where: { userId: req.auth!.userId },
-    orderBy: { dueDate: 'asc' },
+  const tasks = await StudyTask.find({ userId: req.auth!.userId }).sort({ dueDate: 1 }).lean()
+  res.json({
+    tasks: tasks.map((t) => ({
+      id: t._id,
+      title: t.title,
+      dueDate: new Date(t.dueDate).toISOString().slice(0, 10),
+    })),
   })
-  res.json({ tasks: tasks.map((t) => ({ id: t.id, title: t.title, dueDate: t.dueDate.toISOString().slice(0, 10) })) })
 })
 
 const plannerSchema = z.object({
@@ -173,24 +168,19 @@ router.post('/study-planner', authenticateJWT, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
 
   const { title, dueDate } = parsed.data
-  const task = await prisma.studyTask.create({
-    data: { userId: req.auth!.userId, title, dueDate: new Date(dueDate) },
+  const task = await StudyTask.create({
+    userId: req.auth!.userId,
+    title,
+    dueDate: new Date(dueDate),
   })
-  res.json({ task })
+  res.json({ task: leanDoc(task.toObject()) })
 })
 
-// ── GET subjects list (for doubt subject dropdown) ────────────────────────
 router.get('/subjects', authenticateJWT, async (_req, res) => {
-  const teachers = await prisma.teacher.findMany({
-    select: { subject: true },
-  })
-  // Also get course names
-  const courses = await prisma.course.findMany({
-    select: { name: true },
-    distinct: ['name'],
-  })
-  const fromTeachers = teachers.map(t => t.subject).filter(Boolean)
-  const fromCourses = courses.map(c => c.name).filter(Boolean)
+  const teachers = await Teacher.find().select('subject').lean()
+  const courses = await Course.distinct('name')
+  const fromTeachers = teachers.map((t) => t.subject).filter(Boolean)
+  const fromCourses = (courses as string[]).filter(Boolean)
   const all = [...new Set([...fromTeachers, ...fromCourses])].sort()
   res.json({ subjects: all })
 })
@@ -199,93 +189,70 @@ router.get('/doubts', authenticateJWT, async (req, res) => {
   const role = req.auth!.role
 
   if (role === 'student') {
-    const doubts = await prisma.doubt.findMany({
-      where: { userId: req.auth!.userId },
-      orderBy: { createdAt: 'desc' },
-    })
+    const doubts = await Doubt.find({ userId: req.auth!.userId }).sort({ createdAt: -1 }).lean()
     return res.json({
       doubts: doubts.map((d) => ({
-        id: d.id,
+        id: d._id,
         subject: d.subject ?? '',
         question: d.question,
         status: d.status,
         teacherReply: d.teacherReply,
-        createdAt: d.createdAt.toISOString().slice(0, 10),
+        createdAt: new Date(d.createdAt).toISOString().slice(0, 10),
       })),
     })
   }
 
-  // teacher: only see doubts matching their subject(s)
   if (role === 'teacher') {
-    const teacher = await prisma.teacher.findUnique({
-      where: { userId: req.auth!.userId },
-      select: { subject: true },
-    })
-    // Also get course names for this teacher
-    const courses = await prisma.course.findMany({
-      where: { teacher: { userId: req.auth!.userId } },
-      select: { name: true },
-    })
-    const teacherSubjects = [
-      teacher?.subject,
-      ...courses.map(c => c.name),
-    ].filter(Boolean).map(s => s!.toLowerCase())
+    const teacher = await Teacher.findOne({ userId: req.auth!.userId }).select('_id subject').lean()
+    const courses = teacher
+      ? await Course.find({ teacherId: teacher._id }).select('name').lean()
+      : []
+    const teacherSubjects = [teacher?.subject, ...courses.map((c) => c.name)]
+      .filter(Boolean)
+      .map((s) => s!.toLowerCase())
 
-    const allDoubts = await prisma.doubt.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-      include: {
-        user: {
-          select: {
-            name: true,
-            studentProfile: { select: { className: true } },
-          },
-        },
-      },
-    })
+    const allDoubts = await Doubt.find().sort({ createdAt: -1 }).limit(100).lean()
+    const userIds = [...new Set(allDoubts.map((d) => d.userId))]
+    const users = await User.find({ _id: { $in: userIds } }).select('name').lean()
+    const profiles = await StudentProfile.find({ userId: { $in: userIds } }).select('userId className').lean()
+    const userNameById = new Map(users.map((u) => [u._id, u.name]))
+    const classNameByUserId = new Map(profiles.map((p) => [p.userId, p.className]))
 
-    // Filter to matching subjects (case-insensitive)
-    const filtered = allDoubts.filter(d =>
-      !d.subject || teacherSubjects.includes(d.subject.toLowerCase())
+    const filtered = allDoubts.filter(
+      (d) => !d.subject || teacherSubjects.includes(d.subject.toLowerCase()),
     )
 
     return res.json({
       doubts: filtered.map((d) => ({
-        id: d.id,
+        id: d._id,
         subject: d.subject ?? '',
         question: d.question,
         status: d.status,
         teacherReply: d.teacherReply,
-        createdAt: d.createdAt.toISOString().slice(0, 10),
-        studentName: (d as any).user?.name ?? '—',
-        className: (d as any).user?.studentProfile?.className ?? null,
+        createdAt: new Date(d.createdAt).toISOString().slice(0, 10),
+        studentName: userNameById.get(d.userId) ?? '—',
+        className: classNameByUserId.get(d.userId) ?? null,
       })),
     })
   }
 
-  // admin: all doubts
-  const doubts = await prisma.doubt.findMany({
-    orderBy: { createdAt: 'desc' },
-    take: 100,
-    include: {
-      user: {
-        select: {
-          name: true,
-          studentProfile: { select: { className: true } },
-        },
-      },
-    },
-  })
+  const doubts = await Doubt.find().sort({ createdAt: -1 }).limit(100).lean()
+  const userIds = [...new Set(doubts.map((d) => d.userId))]
+  const users = await User.find({ _id: { $in: userIds } }).select('name').lean()
+  const profiles = await StudentProfile.find({ userId: { $in: userIds } }).select('userId className').lean()
+  const userNameById = new Map(users.map((u) => [u._id, u.name]))
+  const classNameByUserId = new Map(profiles.map((p) => [p.userId, p.className]))
+
   res.json({
     doubts: doubts.map((d) => ({
-      id: d.id,
+      id: d._id,
       subject: d.subject ?? '',
       question: d.question,
       status: d.status,
       teacherReply: d.teacherReply,
-      createdAt: d.createdAt.toISOString().slice(0, 10),
-      studentName: (d as any).user?.name ?? '—',
-      className: (d as any).user?.studentProfile?.className ?? null,
+      createdAt: new Date(d.createdAt).toISOString().slice(0, 10),
+      studentName: userNameById.get(d.userId) ?? '—',
+      className: classNameByUserId.get(d.userId) ?? null,
     })),
   })
 })
@@ -303,14 +270,26 @@ router.post('/doubts', authenticateJWT, async (req, res) => {
 
     const { subject, question } = parsed.data
 
-    const doubt = await prisma.doubt.create({
-      data: { userId: req.auth!.userId, subject, question, studentId: null, status: 'open' },
+    const doubt = await Doubt.create({
+      userId: req.auth!.userId,
+      subject,
+      question,
+      studentId: null,
+      status: 'open',
     })
 
-    const student = await prisma.user.findUnique({ where: { id: req.auth!.userId }, select: { name: true } })
+    const student = await User.findById(req.auth!.userId).select('name').lean()
 
-    const allTeachers = await prisma.teacher.findMany({ select: { userId: true, subject: true } })
-    const allCourses = await prisma.course.findMany({ include: { teacher: { select: { userId: true } } } })
+    const allTeachers = await Teacher.find().select('userId subject').lean()
+    const allCourses = await Course.find().lean()
+    const teacherIds = [...new Set(allCourses.map((c) => c.teacherId))]
+    const courseTeachers = await Teacher.find({ _id: { $in: teacherIds } }).select('userId').lean()
+    const teacherUserIdByCourseId = new Map(
+      allCourses.map((c) => {
+        const t = courseTeachers.find((ct) => ct._id === c.teacherId)
+        return [c._id, t?.userId]
+      }),
+    )
 
     const subjectLower = subject.toLowerCase()
     const notifyIds = new Set<string>()
@@ -319,22 +298,23 @@ router.post('/doubts', authenticateJWT, async (req, res) => {
       if (t.subject && t.subject.toLowerCase() === subjectLower) notifyIds.add(t.userId)
     }
     for (const c of allCourses) {
-      if (c.name.toLowerCase() === subjectLower) notifyIds.add(c.teacher.userId)
+      if (c.name.toLowerCase() === subjectLower) {
+        const uid = teacherUserIdByCourseId.get(c._id)
+        if (uid) notifyIds.add(uid)
+      }
     }
-    if (notifyIds.size === 0) allTeachers.forEach(t => notifyIds.add(t.userId))
+    if (notifyIds.size === 0) allTeachers.forEach((t) => notifyIds.add(t.userId))
 
     for (const userId of notifyIds) {
-      await prisma.notice.create({
-        data: {
-          title: `New Doubt: ${subject}`,
-          description: `${student?.name ?? 'A student'} asked: "${question}"`,
-          type: 'notice',
-          userId,
-        },
+      await Notice.create({
+        title: `New Doubt: ${subject}`,
+        description: `${student?.name ?? 'A student'} asked: "${question}"`,
+        type: 'notice',
+        userId,
       })
     }
 
-    res.json({ doubt })
+    res.json({ doubt: leanDoc(doubt.toObject()) })
   } catch (err: any) {
     console.error('[POST /doubts]', err?.message, err?.stack)
     res.status(500).json({ message: err?.message ?? 'Failed to submit doubt' })
@@ -351,24 +331,23 @@ router.post('/doubts/:doubtId/reply', authenticateJWT, async (req, res) => {
     if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
 
     const doubtId = Array.isArray(req.params.doubtId) ? req.params.doubtId[0] : req.params.doubtId
-    const doubt = await prisma.doubt.findUnique({ where: { id: doubtId } })
+    const doubt = await Doubt.findById(doubtId).lean()
     if (!doubt) return res.status(404).json({ message: 'Doubt not found' })
 
-    const updated = await prisma.doubt.update({
-      where: { id: doubtId },
-      data: { teacherReply: parsed.data.reply, status: 'answered' },
+    const updated = await Doubt.findByIdAndUpdate(
+      doubtId,
+      { teacherReply: parsed.data.reply, status: 'answered' },
+      { new: true },
+    )
+
+    await Notice.create({
+      title: `Doubt Answered: ${doubt.subject ?? 'Your doubt'}`,
+      description: `Your doubt has been answered: "${parsed.data.reply.slice(0, 100)}"`,
+      type: 'notice',
+      userId: doubt.userId,
     })
 
-    await prisma.notice.create({
-      data: {
-        title: `Doubt Answered: ${doubt.subject ?? 'Your doubt'}`,
-        description: `Your doubt has been answered: "${parsed.data.reply.slice(0, 100)}"`,
-        type: 'notice',
-        userId: doubt.userId,
-      },
-    })
-
-    res.json({ doubt: updated })
+    res.json({ doubt: leanDoc(updated!.toObject()) })
   } catch (err: any) {
     console.error('[POST /doubts/:id/reply]', err?.message)
     res.status(500).json({ message: err?.message ?? 'Failed to reply' })
@@ -376,4 +355,3 @@ router.post('/doubts/:doubtId/reply', authenticateJWT, async (req, res) => {
 })
 
 export default router
-

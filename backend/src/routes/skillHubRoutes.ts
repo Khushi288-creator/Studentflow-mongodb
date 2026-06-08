@@ -1,54 +1,68 @@
 import express from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/prisma'
 import { authenticateJWT, requireRole } from '../middleware/auth'
+import { Activity } from '../models/Activity'
+import { ActivityFaculty } from '../models/ActivityFaculty'
+import { ActivityEnrollment } from '../models/ActivityEnrollment'
+import { ActivityCertificate } from '../models/ActivityCertificate'
+import { User } from '../models/User'
+import { leanDoc } from '../utils/mongoHelpers'
 
 const router = express.Router()
 
-// ── helpers ────────────────────────────────────────────────────────────────
-// Zod v4: empty string → fallback default value
-const strDefault = (def: string) => z.string().transform(v => (v === '' ? def : v))
-// empty string or missing → null
-const optStr = z.string().transform(v => (v === '' ? null : v)).nullable().optional()
+const strDefault = (def: string) => z.string().transform((v) => (v === '' ? def : v))
+const optStr = z.string().transform((v) => (v === '' ? null : v)).nullable().optional()
 
 const activitySchema = z.object({
-  name:         z.string().min(1),
-  description:  z.string().min(1),
-  duration:     z.string().min(1),
-  fees:         z.coerce.number().int().min(0),
+  name: z.string().min(1),
+  description: z.string().min(1),
+  duration: z.string().min(1),
+  fees: z.coerce.number().int().min(0),
   scheduleDays: z.string().min(1),
   scheduleTime: optStr,
-  targetClass:  strDefault('All Classes'),
-  capacity:     z.coerce.number().int().positive().optional().nullable(),
-  level:        strDefault('Beginner'),
-  batch:        strDefault('Morning'),
-  icon:         strDefault('🎯'),
+  targetClass: strDefault('All Classes'),
+  capacity: z.coerce.number().int().positive().optional().nullable(),
+  level: strDefault('Beginner'),
+  batch: strDefault('Morning'),
+  icon: strDefault('🎯'),
 })
 
 const facultySchema = z.object({
-  name:         z.string().min(1),
-  activityId:   z.string().min(1),
-  salaryType:   z.enum(['fixed', 'per_student']),
+  name: z.string().min(1),
+  activityId: z.string().min(1),
+  salaryType: z.enum(['fixed', 'per_student']),
   salaryAmount: z.number().int().min(0),
 })
 
-// ── GET all activities (all roles) ────────────────────────────────────────
 router.get('/skill-hub/activities', authenticateJWT, async (req, res) => {
-  const activities = await prisma.activity.findMany({
-    orderBy: { createdAt: 'desc' },
-    include: { faculty: true, enrollments: { select: { id: true } } },
-  })
+  const activities = await Activity.find().sort({ createdAt: -1 }).lean()
+  const activityIds = activities.map((a) => a._id)
+
+  const allFaculty = await ActivityFaculty.find({ activityId: { $in: activityIds } }).lean()
+  const facultyByActivity = new Map<string, (typeof allFaculty)[0][]>()
+  for (const f of allFaculty) {
+    const list = facultyByActivity.get(f.activityId) ?? []
+    list.push(f)
+    facultyByActivity.set(f.activityId, list)
+  }
+
+  const allEnrollments = await ActivityEnrollment.find({ activityId: { $in: activityIds } })
+    .select('_id activityId')
+    .lean()
+  const enrollmentCountByActivity = new Map<string, number>()
+  for (const e of allEnrollments) {
+    enrollmentCountByActivity.set(e.activityId, (enrollmentCountByActivity.get(e.activityId) ?? 0) + 1)
+  }
 
   const userId = req.auth!.userId
-  const myEnrollments = await prisma.activityEnrollment.findMany({
-    where: { studentId: userId },
-    select: { activityId: true, paymentStatus: true, rating: true },
-  })
-  const enrollMap = new Map(myEnrollments.map(e => [e.activityId, e]))
+  const myEnrollments = await ActivityEnrollment.find({ studentId: userId })
+    .select('activityId paymentStatus rating')
+    .lean()
+  const enrollMap = new Map(myEnrollments.map((e) => [e.activityId, e]))
 
   res.json({
-    activities: activities.map(a => ({
-      id: a.id,
+    activities: activities.map((a) => ({
+      id: a._id,
       name: a.name,
       description: a.description,
       duration: a.duration,
@@ -60,25 +74,29 @@ router.get('/skill-hub/activities', authenticateJWT, async (req, res) => {
       level: a.level,
       batch: a.batch,
       icon: a.icon,
-      faculty: a.faculty[0] ?? null,
-      enrolledCount: a.enrollments.length,
-      isEnrolled: enrollMap.has(a.id),
-      paymentStatus: enrollMap.get(a.id)?.paymentStatus ?? null,
-      myRating: enrollMap.get(a.id)?.rating ?? null,
+      faculty: facultyByActivity.get(a._id)?.[0] ? leanDoc(facultyByActivity.get(a._id)![0]) : null,
+      enrolledCount: enrollmentCountByActivity.get(a._id) ?? 0,
+      isEnrolled: enrollMap.has(a._id),
+      paymentStatus: enrollMap.get(a._id)?.paymentStatus ?? null,
+      myRating: enrollMap.get(a._id)?.rating ?? null,
     })),
   })
 })
 
-// ── GET faculty list ───────────────────────────────────────────────────────
 router.get('/skill-hub/faculty', authenticateJWT, requireRole(['admin']), async (_req, res) => {
-  const faculty = await prisma.activityFaculty.findMany({
-    orderBy: { createdAt: 'desc' },
-    include: { activity: { select: { name: true } } },
+  const faculty = await ActivityFaculty.find().sort({ createdAt: -1 }).lean()
+  const activityIds = [...new Set(faculty.map((f) => f.activityId))]
+  const activities = await Activity.find({ _id: { $in: activityIds } }).select('name').lean()
+  const activityNameById = new Map(activities.map((a) => [a._id, a.name]))
+
+  res.json({
+    faculty: faculty.map((f) => ({
+      ...leanDoc(f),
+      activity: { name: activityNameById.get(f.activityId) ?? '' },
+    })),
   })
-  res.json({ faculty })
 })
 
-// ── POST create activity (admin) ───────────────────────────────────────────
 router.post('/skill-hub/activities', authenticateJWT, requireRole(['admin']), async (req, res) => {
   try {
     const parsed = activitySchema.safeParse(req.body)
@@ -87,117 +105,105 @@ router.post('/skill-hub/activities', authenticateJWT, requireRole(['admin']), as
       ...parsed.data,
       scheduleTime: parsed.data.scheduleTime || null,
     }
-    const activity = await prisma.activity.create({ data })
-    res.status(201).json({ activity })
+    const activity = await Activity.create(data)
+    res.status(201).json({ activity: leanDoc(activity.toObject()) })
   } catch (err: any) {
     console.error('CREATE ACTIVITY ERROR:', err)
     return res.status(500).json({ message: err?.message ?? 'Internal server error' })
   }
 })
 
-// ── PUT edit activity (admin) ──────────────────────────────────────────────
 router.put('/skill-hub/activities/:id', authenticateJWT, requireRole(['admin']), async (req, res) => {
   try {
     const id = req.params.id as string
     const parsed = activitySchema.partial().safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
-    const data = {
-      ...parsed.data,
-      scheduleTime: parsed.data.scheduleTime !== undefined ? (parsed.data.scheduleTime || null) : undefined,
+    const data: Record<string, unknown> = { ...parsed.data }
+    if (parsed.data.scheduleTime !== undefined) {
+      data.scheduleTime = parsed.data.scheduleTime || null
     }
-    const activity = await prisma.activity.update({ where: { id }, data })
-    res.json({ activity })
+    const activity = await Activity.findByIdAndUpdate(id, data, { new: true })
+    if (!activity) return res.status(404).json({ message: 'Activity not found' })
+    res.json({ activity: leanDoc(activity.toObject()) })
   } catch (err: any) {
     console.error('UPDATE ACTIVITY ERROR:', err)
     return res.status(500).json({ message: err?.message ?? 'Internal server error' })
   }
 })
 
-// ── DELETE activity (admin) ────────────────────────────────────────────────
 router.delete('/skill-hub/activities/:id', authenticateJWT, requireRole(['admin']), async (req, res) => {
   const id = req.params.id as string
-  await prisma.activity.delete({ where: { id } })
+  await Activity.findByIdAndDelete(id)
   res.json({ ok: true })
 })
 
-// ── POST create faculty (admin) ────────────────────────────────────────────
 router.post('/skill-hub/faculty', authenticateJWT, requireRole(['admin']), async (req, res) => {
   const parsed = facultySchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message })
-  const faculty = await prisma.activityFaculty.create({ data: parsed.data })
-  res.status(201).json({ faculty })
+  const faculty = await ActivityFaculty.create(parsed.data)
+  res.status(201).json({ faculty: leanDoc(faculty.toObject()) })
 })
 
-// ── DELETE faculty (admin) ─────────────────────────────────────────────────
 router.delete('/skill-hub/faculty/:id', authenticateJWT, requireRole(['admin']), async (req, res) => {
   const id = req.params.id as string
-  await prisma.activityFaculty.delete({ where: { id } })
+  await ActivityFaculty.findByIdAndDelete(id)
   res.json({ ok: true })
 })
 
-// ── POST enroll student ────────────────────────────────────────────────────
 router.post('/skill-hub/activities/:id/enroll', authenticateJWT, async (req, res) => {
   const activityId = req.params.id as string
-  const studentId  = req.auth!.userId
+  const studentId = req.auth!.userId
 
-  const existing = await prisma.activityEnrollment.findUnique({
-    where: { studentId_activityId: { studentId, activityId } },
-  })
+  const existing = await ActivityEnrollment.findOne({ studentId, activityId }).lean()
   if (existing) return res.status(409).json({ message: 'Already enrolled' })
 
-  const activity = await prisma.activity.findUnique({ where: { id: activityId } })
+  const activity = await Activity.findById(activityId).lean()
   if (!activity) return res.status(404).json({ message: 'Activity not found' })
 
-  // capacity check
   if (activity.capacity) {
-    const count = await prisma.activityEnrollment.count({ where: { activityId } })
+    const count = await ActivityEnrollment.countDocuments({ activityId })
     if (count >= activity.capacity) return res.status(400).json({ message: 'Activity is full' })
   }
 
-  const enrollment = await prisma.activityEnrollment.create({
-    data: { studentId, activityId, paymentStatus: 'paid' },
+  const enrollment = await ActivityEnrollment.create({
+    studentId,
+    activityId,
+    paymentStatus: 'paid',
   })
-  res.status(201).json({ enrollment })
+  res.status(201).json({ enrollment: leanDoc(enrollment.toObject()) })
 })
 
-// ── POST rate activity ─────────────────────────────────────────────────────
 router.post('/skill-hub/activities/:id/rate', authenticateJWT, async (req, res) => {
   const activityId = req.params.id as string
-  const studentId  = req.auth!.userId
+  const studentId = req.auth!.userId
   const rating = Number(req.body.rating)
   if (!rating || rating < 1 || rating > 5) return res.status(400).json({ message: 'Rating must be 1–5' })
 
-  const enrollment = await prisma.activityEnrollment.findUnique({
-    where: { studentId_activityId: { studentId, activityId } },
-  })
+  const enrollment = await ActivityEnrollment.findOne({ studentId, activityId }).lean()
   if (!enrollment) return res.status(403).json({ message: 'Not enrolled' })
 
-  await prisma.activityEnrollment.update({
-    where: { studentId_activityId: { studentId, activityId } },
-    data: { rating },
-  })
+  await ActivityEnrollment.findOneAndUpdate({ studentId, activityId }, { rating })
   res.json({ ok: true })
 })
 
-// ── GET salary report (admin) ──────────────────────────────────────────────
 router.get('/skill-hub/salary', authenticateJWT, requireRole(['admin']), async (_req, res) => {
-  const faculty = await prisma.activityFaculty.findMany({
-    include: {
-      activity: {
-        select: { name: true, enrollments: { select: { id: true } } },
-      },
-    },
-  })
+  const faculty = await ActivityFaculty.find().lean()
+  const activityIds = [...new Set(faculty.map((f) => f.activityId))]
+  const activities = await Activity.find({ _id: { $in: activityIds } }).select('name').lean()
+  const activityNameById = new Map(activities.map((a) => [a._id, a.name]))
+  const enrollmentCounts = await ActivityEnrollment.aggregate([
+    { $match: { activityId: { $in: activityIds } } },
+    { $group: { _id: '$activityId', count: { $sum: 1 } } },
+  ])
+  const countByActivity = new Map(enrollmentCounts.map((e) => [e._id, e.count as number]))
 
-  const report = faculty.map(f => {
-    const studentCount = f.activity.enrollments.length
-    const netSalary = f.salaryType === 'fixed'
-      ? f.salaryAmount
-      : f.salaryAmount * studentCount
+  const report = faculty.map((f) => {
+    const studentCount = countByActivity.get(f.activityId) ?? 0
+    const netSalary = f.salaryType === 'fixed' ? f.salaryAmount : f.salaryAmount * studentCount
     return {
-      id: f.id,
+      id: f._id,
       facultyName: f.name,
-      activityName: f.activity.name,
+      activityName: activityNameById.get(f.activityId) ?? '',
       salaryType: f.salaryType,
       salaryAmount: f.salaryAmount,
       studentCount,
@@ -208,28 +214,36 @@ router.get('/skill-hub/salary', authenticateJWT, requireRole(['admin']), async (
   res.json({ report })
 })
 
-// ── POST issue certificate (admin) ────────────────────────────────────────
 router.post('/skill-hub/activities/:id/certificate', authenticateJWT, requireRole(['admin']), async (req, res) => {
   const activityId = req.params.id as string
   const { studentId } = req.body
   if (!studentId) return res.status(400).json({ message: 'studentId required' })
 
-  const cert = await prisma.activityCertificate.upsert({
-    where: { studentId_activityId: { studentId, activityId } } as any,
-    update: { issuedDate: new Date().toISOString().slice(0, 10) },
-    create: { studentId, activityId, issuedDate: new Date().toISOString().slice(0, 10) },
-  })
-  res.json({ certificate: cert })
+  const issuedDate = new Date().toISOString().slice(0, 10)
+  const cert = await ActivityCertificate.findOneAndUpdate(
+    { studentId, activityId },
+    { $set: { issuedDate }, $setOnInsert: { studentId, activityId } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  )
+  res.json({ certificate: leanDoc(cert.toObject()) })
 })
 
-// ── GET enrollments for an activity (admin) ────────────────────────────────
 router.get('/skill-hub/activities/:id/enrollments', authenticateJWT, requireRole(['admin']), async (req, res) => {
   const activityId = req.params.id as string
-  const enrollments = await prisma.activityEnrollment.findMany({
-    where: { activityId },
-    include: { student: { select: { id: true, name: true } } },
+  const enrollments = await ActivityEnrollment.find({ activityId }).lean()
+  const studentIds = [...new Set(enrollments.map((e) => e.studentId))]
+  const students = await User.find({ _id: { $in: studentIds } }).select('name').lean()
+  const studentById = new Map(students.map((s) => [s._id, s]))
+
+  res.json({
+    enrollments: enrollments.map((e) => ({
+      ...leanDoc(e),
+      student: {
+        id: e.studentId,
+        name: studentById.get(e.studentId)?.name ?? '',
+      },
+    })),
   })
-  res.json({ enrollments })
 })
 
 export default router
