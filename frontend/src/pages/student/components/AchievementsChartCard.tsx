@@ -80,7 +80,7 @@ export default function AchievementsChartCard() {
                       color: '#f1f5f9',
                       fontSize: 12,
                     }}
-                    formatter={(value: number, name: string) => [`${value}`, name]}
+                    formatter={(value, name) => [`${value ?? 0}`, String(name)]}
                   />
                   <Legend
                     iconType="circle"

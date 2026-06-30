@@ -186,7 +186,9 @@ export default function AdminDashboard() {
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="name" tick={{ fontSize: 11 }} />
                   <YAxis tick={{ fontSize: 11 }} />
-                  <Tooltip formatter={(v: number) => `₹${v}`} />
+                 <Tooltip
+  formatter={(value) => [`₹${value ?? 0}`, 'Amount']}
+/>
                   <Line type="monotone" dataKey="value" stroke="#818cf8" strokeWidth={2} dot={{ r: 5 }} />
                 </LineChart>
               </ResponsiveContainer>

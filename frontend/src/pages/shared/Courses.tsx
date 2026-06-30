@@ -24,9 +24,14 @@ export default function Courses() {
   const dynamicCourses = data?.courses ?? []
   // Only show default subjects if DB has NO courses at all
   // If DB has courses, show only DB courses (with teacher names)
-  const subjects = dynamicCourses.length > 0
+  const subjects: Course[] =
+  dynamicCourses.length > 0
     ? dynamicCourses
-    : DEFAULT_SUBJECTS
+    : DEFAULT_SUBJECTS.map((s) => ({
+        id: s.id,
+        name: s.name,
+        teacherName: undefined,
+      }))
 
   return (
     <Page
