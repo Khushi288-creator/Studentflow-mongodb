@@ -181,7 +181,7 @@ export default function AdminSalary() {
             { label: 'Pending Salary', value: `₹${totalPending.toLocaleString('en-IN')}`, color: 'from-amber-50 to-orange-50 border-amber-200 dark:from-amber-600/20 dark:to-orange-600/20 dark:border-amber-500/20', text: 'text-amber-300' },
             { label: 'Teachers Pending', value: pendingCount, color: 'from-rose-50 to-pink-50 border-rose-200 dark:from-rose-600/20 dark:to-pink-600/20 dark:border-rose-500/20', text: 'text-rose-300' },
           ].map(s => (
-            <div key={s.label} className={`rounded-2xl border bg-gradient-to-br ${s.color} p-4 transition-all hover:scale-[1.02]`}>
+            <div key={s.label} className={`rounded-2xl border bg-gradient-to-br dark:bg-gray-900 ${s.color} p-4 transition-all hover:scale-[1.02]`}>
               <div className={`text-2xl font-bold ${s.text}`}>{s.value}</div>
               <div className="text-xs text-slate-400 mt-1">{s.label}</div>
             </div>

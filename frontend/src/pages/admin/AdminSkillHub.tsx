@@ -126,7 +126,7 @@ export default function AdminSkillHub() {
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-[#020617] text-slate-900 dark:text-white">
       {/* Header */}
-      <div className="border-b border-slate-200 dark:border-slate-200 dark:border-white/8 bg-white dark:bg-white/80 dark:bg-white/3 px-6 py-5">
+      <div className="border-b border-slate-200 dark:border-white/8 bg-white dark:bg-white/3 px-6 py-5">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 text-lg shadow-lg shadow-indigo-500/25">🎯</div>
@@ -156,14 +156,15 @@ export default function AdminSkillHub() {
         {/* Stats */}
         <div className="grid grid-cols-3 gap-4">
           {[
-            { label: 'Total Activities', value: activities.length, color: 'from-indigo-50 to-purple-50 border-indigo-200 dark:from-indigo-600/20 dark:to-purple-600/20 dark:border-indigo-500/20', text: 'text-indigo-300' },
-            { label: 'Total Enrolled', value: activities.reduce((a, x) => a + x.enrolledCount, 0), color: 'from-emerald-50 to-teal-50 border-emerald-200 dark:from-emerald-600/20 dark:to-teal-600/20 dark:border-emerald-500/20', text: 'text-emerald-300' },
-            { label: 'Faculty Members', value: faculty.length, color: 'from-violet-50 to-pink-50 border-violet-200 dark:from-violet-600/20 dark:to-pink-600/20 dark:border-violet-500/20', text: 'text-violet-300' },
-          ].map(s => (
-            <div key={s.label} className={`rounded-2xl border bg-gradient-to-br ${s.color} p-4 transition-all hover:scale-[1.02]`}>
+            { label: 'Total Activities', value: activities.length, color: 'from-indigo-50 to-purple-50 border-indigo-200 dark:from-indigo-600/20 dark:to-purple-600/20 dark:border-indigo-500/20', text: 'text-indigo-600 dark:text-indigo-300' },
+            { label: 'Total Enrolled', value: activities.reduce((a, x) => a + x.enrolledCount, 0), color: 'from-emerald-50 to-teal-50 border-emerald-200 dark:from-emerald-600/20 dark:to-teal-600/20 dark:border-emerald-500/20', text: 'text-emerald-600 dark:text-emerald-300' },
+            { label: 'Faculty Members', value: faculty.length, color: 'from-violet-50 to-pink-50 border-violet-200 dark:from-violet-600/20 dark:to-pink-600/20 dark:border-violet-500/20', text: 'text-violet-600 dark:text-violet-300' },
+            
+            ].map(s => (           
+              <div key={s.label} className={`rounded-2xl border bg-gradient-to-br dark:bg-gray-900 ${s.color} p-4 transition-all hover:scale-[1.02]`}>
               <div className={`text-2xl font-bold ${s.text}`}>{s.value}</div>
-              <div className="text-xs text-slate-400 mt-1">{s.label}</div>
-            </div>
+              <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">{s.label}</div>
+        </div>
           ))}
         </div>
 

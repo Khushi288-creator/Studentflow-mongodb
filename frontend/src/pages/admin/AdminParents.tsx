@@ -78,7 +78,7 @@ export default function AdminParents() {
 
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-[#020617] text-slate-900 dark:text-white">
-      <div className="border-b border-slate-200 dark:border-slate-200 dark:border-white/8 bg-white dark:bg-white/80 dark:bg-white/3 px-6 py-5">
+      <div className="border-b border-slate-200 dark:border-white/8 bg-white dark:bg-white/3 px-6 py-5">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-pink-500 to-rose-600 text-lg shadow-lg">👨‍👩‍👧</div>
@@ -98,11 +98,11 @@ export default function AdminParents() {
         {/* Stats */}
         <div className="grid grid-cols-3 gap-4">
           {[
-            { label: 'Total Parents', value: parents.length, color: 'from-pink-50 to-rose-50 border-pink-200 dark:from-pink-600/20 dark:to-rose-600/20 dark:border-pink-500/20', text: 'text-pink-300' },
-            { label: 'Linked to Student', value: parents.filter(p => p.studentId).length, color: 'from-emerald-50 to-teal-50 border-emerald-200 dark:from-emerald-600/20 dark:to-teal-600/20 dark:border-emerald-500/20', text: 'text-emerald-300' },
-            { label: 'Not Linked', value: parents.filter(p => !p.studentId).length, color: 'from-amber-50 to-orange-50 border-amber-200 dark:from-amber-600/20 dark:to-orange-600/20 dark:border-amber-500/20', text: 'text-amber-300' },
+            { label: 'Total Parents', value: parents.length, color: 'from-pink-50 to-rose-50 border-pink-200 dark:from-pink-600/20 dark:to-rose-600/20 dark:border-pink-500/20', text: 'text-pink-600 dark:text-pink-300' },
+            { label: 'Linked to Student', value: parents.filter(p => p.studentId).length, color: 'from-emerald-50 to-teal-50 border-emerald-200 dark:from-emerald-600/20 dark:to-teal-600/20 dark:border-emerald-500/20', text: 'text-emerald-600 dark:text-emerald-300' },
+            { label: 'Not Linked', value: parents.filter(p => !p.studentId).length, color: 'from-amber-50 to-orange-50 border-amber-200 dark:from-amber-600/20 dark:to-orange-600/20 dark:border-amber-500/20', text: 'text-amber-600 dark:text-amber-300' },
           ].map(s => (
-            <div key={s.label} className={`rounded-2xl border bg-gradient-to-br ${s.color} p-4`}>
+            <div key={s.label} className={`rounded-2xl border bg-gradient-to-br dark:bg-gray-900 ${s.color} p-4`}>
               <div className={`text-2xl font-bold ${s.text}`}>{s.value}</div>
               <div className="text-xs text-slate-400 mt-1">{s.label}</div>
             </div>
